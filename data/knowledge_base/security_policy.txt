@@ -1,0 +1,45 @@
+INFORMATION SECURITY POLICY
+============================
+Version: 2.1 | Last Updated: 2025-01
+
+1. ACCESS CONTROL
+-----------------
+- All employees must use strong, unique passwords (minimum 12 characters).
+- Multi-factor authentication (MFA) is mandatory for all internal systems.
+- Access to production systems is restricted to senior engineers and ops team.
+- Shared credentials are strictly prohibited. Each user must have a personal account.
+- Access rights must be reviewed every 90 days and revoked upon role change or offboarding.
+
+2. DATA CLASSIFICATION
+-----------------------
+- Confidential: Customer PII, financial records, source code, API keys. Never share externally.
+- Internal: HR documents, architecture diagrams, internal roadmaps. Share within the company only.
+- Public: Blog posts, press releases, open-source repos. Can be shared freely.
+
+3. INCIDENT RESPONSE
+---------------------
+- Any suspected security incident must be reported to security@company.com within 1 hour.
+- Do not attempt to remediate a breach without involving the security team.
+- Preserve all logs and evidence. Do not delete or modify any files after an incident.
+- The on-call security engineer is reachable via PagerDuty 24/7.
+
+4. DEVICE MANAGEMENT
+---------------------
+- All devices accessing company systems must be enrolled in MDM.
+- Full-disk encryption (FileVault / BitLocker) must be enabled.
+- Automatic screen lock must activate after 5 minutes of inactivity.
+- Lost or stolen devices must be reported to IT within 30 minutes.
+
+5. DATA RESIDENCY & PRIVACY
+----------------------------
+- All customer data must reside within the EU data region (GDPR compliance).
+- Sending customer PII to third-party AI APIs (e.g., OpenAI, Anthropic Cloud) is prohibited.
+- Use only approved on-premise or self-hosted AI tools for processing sensitive data.
+- Data retention: customer data deleted 90 days after contract termination.
+
+6. CODE & SECRET MANAGEMENT
+-----------------------------
+- Never commit API keys, passwords, or tokens to version control.
+- Use the company Vault (HashiCorp Vault) for all secrets. Local .env files must be gitignored.
+- All code must pass SAST scan before merging to main branch.
+- Dependency vulnerabilities with CVSS > 7.0 must be patched within 48 hours.

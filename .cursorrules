@@ -1,0 +1,44 @@
+# .cursorrules — Cursor AI Rules File
+# =====================================
+# This file is read by Cursor at the start of every session.
+# It sets the AI's behaviour, code conventions, and project context.
+# Think of it as persistent memory: write it once, save tokens forever.
+
+## Project Context
+This is a local RAG (Retrieval-Augmented Generation) demo application.
+- Stack: Python 3.11+, Qdrant (vector DB), FastEmbed (embeddings), Ollama (local LLM), Gradio (UI)
+- Purpose: Demonstrate private, fully local AI search over documents
+- All processing is offline — no external API calls in the core pipeline
+
+## Code Style
+- Use Python type hints everywhere. No `Any` unless absolutely necessary.
+- Prefer dataclasses over plain dicts for structured return values.
+- Write docstrings for every public class and method (Google style).
+- Maximum line length: 100 characters.
+- Use f-strings. Never use % formatting or .format().
+- Prefer pathlib.Path over os.path for file operations.
+
+## What NOT to Do
+- NEVER use `print()` as a logger in production code — use `logging` module.
+- NEVER hardcode file paths. Always use Path(__file__).parent or argparse.
+- NEVER call external APIs (OpenAI, HuggingFace cloud, etc.) — everything must run locally.
+- NEVER use mutable default arguments (def f(x=[]) is a Python anti-pattern).
+- Do NOT install new dependencies without updating requirements.txt.
+
+## Testing Rules
+- All new public functions need a corresponding test.
+- Use pytest fixtures, not setUp/tearDown.
+- Mock external dependencies (Ollama, HuggingFace downloads) in unit tests.
+- Use `scope="module"` for expensive fixtures (e.g. loading embedding models).
+
+## File Structure
+- src/         → core library code (embedder, vector_store, retriever, pipeline, app)
+- tests/       → pytest tests mirroring src/ structure
+- scripts/     → standalone CLI scripts (ingest.py)
+- data/        → sample documents (never commit real customer data here)
+
+## When Writing Code
+1. Return only the changed diff — not the full file unless I ask for it.
+2. Show imports at the top of the diff.
+3. Add a one-line comment explaining WHY, not just WHAT, for non-obvious logic.
+4. If a change breaks a test, fix the test too — don't leave it red.

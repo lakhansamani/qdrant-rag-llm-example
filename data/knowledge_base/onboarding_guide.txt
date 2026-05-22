@@ -1,0 +1,54 @@
+EMPLOYEE ONBOARDING GUIDE
+==========================
+Version: 4.2 | Last Updated: 2025-01
+
+1. FIRST DAY CHECKLIST
+-----------------------
+- Collect your MacBook from the IT desk (Building A, Floor 2).
+- Log into Okta (SSO) using your company email. Okta manages all app access.
+- Enable MFA on your Okta account — this is mandatory before you can access anything else.
+- Join Slack: #general, #engineering, #your-team channels.
+- Request system access via the IT portal at it.company.internal.
+- Meet your onboarding buddy — they're assigned by HR and will help your first week.
+
+2. TOOLS & ACCOUNTS
+--------------------
+- Slack: primary communication. Use threads. DMs discouraged for technical topics.
+- Jira: project and issue tracking. Your team lead will add you to the board.
+- GitHub: source code. Request access to the org via IT portal. Use your company email.
+- Notion: internal wiki, meeting notes, RFCs. Read-only by default, ask for write access.
+- Figma: design files. Engineering has viewer access.
+- 1Password: password manager. IT will send an invite. Use it for all credentials.
+- Zoom: video calls. SSO login via Okta.
+
+3. ENGINEERING ONBOARDING (Week 1)
+------------------------------------
+- Day 1: Setup dev environment. Run the setup.sh script in the engineering-setup repo.
+- Day 2: Read the architecture overview in Notion → Engineering → Architecture.
+- Day 3: Pick a "good first issue" from your team's Jira board and submit your first PR.
+- Day 4: Attend the weekly engineering sync (Thursdays, 10am CET).
+- Day 5: Pair program with your buddy on a real task.
+
+4. PTO & LEAVE POLICY
+-----------------------
+- Annual leave: 25 days per year. Prorated for joiners.
+- Sick leave: unlimited, no approval needed for < 3 days. Doctor's note required for > 3 days.
+- Request PTO via Workday at least 2 weeks in advance.
+- Public holidays follow your country of residence.
+- Parental leave: 16 weeks fully paid for primary caregiver, 8 weeks for secondary.
+
+5. BENEFITS
+-----------
+- Health insurance: covered 100% by company. Dental and vision included.
+- Learning budget: €2,000/year for courses, books, conferences.
+- Home office budget: €1,000 one-time allowance for new joiners.
+- Equipment refresh: every 3 years.
+- Mental health: 12 free therapy sessions per year via Nilo Health.
+
+6. ENGINEERING NORMS
+---------------------
+- On-call: engineers rotate on-call every 6 weeks. You join after your 3-month probation.
+- Code reviews should be done within 24 hours. Be kind and constructive.
+- If you're blocked for > 1 hour, ask for help. Don't suffer in silence.
+- Postmortems are blameless. Focus on systems, not individuals.
+- Documentation is part of the definition of done — if it's not documented, it's not done.

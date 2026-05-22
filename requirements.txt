@@ -1,0 +1,15 @@
+# Core RAG dependencies
+qdrant-client[fastembed]>=1.9.0    # Qdrant vector DB + FastEmbed embeddings
+gradio>=4.44.0                      # Web UI
+
+# Testing
+pytest>=8.0.0                       # Test runner
+pytest-cov>=5.0.0                   # Coverage reporting
+
+# Development (optional)
+ruff>=0.5.0                         # Fast Python linter
+mypy>=1.10.0                        # Static type checker
+
+# Note: Ollama is NOT a Python package.
+# Install it separately from https://ollama.com/download
+# Then pull a model: ollama pull llama3.2

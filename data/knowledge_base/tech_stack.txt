@@ -1,0 +1,56 @@
+TECH STACK & ENGINEERING GUIDE
+================================
+Version: 3.0 | Last Updated: 2025-01
+
+1. BACKEND
+----------
+- Primary language: Python 3.11+ for data/AI services, TypeScript for APIs.
+- Web framework: FastAPI (async, OpenAPI out of the box).
+- Task queues: Celery + Redis for background jobs.
+- Databases: PostgreSQL (primary), Redis (cache), Qdrant (vector search).
+- ORM: SQLAlchemy 2.0 with Alembic migrations.
+
+2. FRONTEND
+-----------
+- Framework: React 18 + TypeScript.
+- State management: Zustand for local state, React Query for server state.
+- UI library: Shadcn/ui components on top of Tailwind CSS.
+- Bundler: Vite.
+
+3. AI / ML STACK
+-----------------
+- Embeddings: FastEmbed (BAAI/bge-small-en-v1.5) — runs locally, no API key.
+- Vector DB: Qdrant — self-hosted via Docker, supports filtering and hybrid search.
+- LLM inference: Ollama for local models (llama3.2, mistral, phi3).
+- Cloud LLMs (non-sensitive tasks only): Anthropic Claude via API.
+- Orchestration: custom pipelines, LangChain used sparingly.
+
+4. INFRASTRUCTURE
+-----------------
+- Cloud: AWS (EU-West-1 region for GDPR).
+- Containers: Docker + Kubernetes (EKS).
+- CI/CD: GitHub Actions → ECR → ArgoCD.
+- Monitoring: Prometheus + Grafana. Alerts via PagerDuty.
+- Logging: ELK Stack (Elasticsearch, Logstash, Kibana).
+
+5. DEVELOPMENT WORKFLOW
+------------------------
+- Branching: GitHub Flow (main + feature branches). No long-lived branches.
+- PRs must have at least 2 approvals and pass all CI checks before merging.
+- Commit messages must follow Conventional Commits (feat:, fix:, docs:, etc.).
+- Test coverage requirement: 80% minimum for new code.
+- All services must have a /health endpoint and a Dockerfile.
+
+6. LOCAL DEVELOPMENT
+---------------------
+- Use Docker Compose for local dependencies (Postgres, Redis, Qdrant).
+- Environment variables managed via .env files (never committed).
+- Pre-commit hooks: ruff (linting), black (formatting), mypy (type checking).
+- Use pyenv to manage Python versions. Always pin to the version in .python-version.
+
+7. VECTOR SEARCH WITH QDRANT
+-----------------------------
+- Collections must define vector size matching the embedding model (384 for bge-small-en).
+- Use cosine distance as the default similarity metric.
+- Always add payload filters for multi-tenant queries (filter by user_id or department).
+- For hybrid search, combine dense vectors with BM25 sparse vectors.
