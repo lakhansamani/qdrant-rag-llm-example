@@ -21,6 +21,7 @@ Sample documents live in `data/knowledge_base/` (security policy, tech stack, on
 | Requirement | Notes |
 |-------------|--------|
 | **Python 3.11+** | [python.org](https://www.python.org/downloads/) |
+| **Docker** | [docker.com](https://www.docker.com/) — runs the Qdrant container (which ships with a dashboard UI for browsing embeddings) |
 | **Ollama** | [ollama.com/download](https://ollama.com/download) — local LLM server |
 | **~2–4 GB disk** | For one Ollama model; first run also downloads ~25 MB embedding weights |
 
@@ -56,7 +57,23 @@ ruff check src/ tests/
 mypy src/ --ignore-missing-imports
 ```
 
-### 3. Install Ollama and pull a model
+### 3. Start Qdrant (Docker)
+
+The demo defaults to a Qdrant server running on `http://localhost:6333`, which
+also serves a built-in **dashboard UI** for browsing collections and visualising
+embeddings.
+
+```bash
+docker compose up -d         # uses docker-compose.yml in the repo root
+```
+
+Then open the dashboard at **http://localhost:6333/dashboard** — go to the
+`kb` collection → **Visualize** tab to see your vectors plotted in 2D.
+
+> Prefer to skip Docker? You can still run with embedded storage:
+> `python src/app.py --storage :memory:` or `--storage ./qdrant_data`.
+
+### 4. Install Ollama and pull a model
 
 ```bash
 # macOS / Linux
@@ -84,7 +101,7 @@ Ollama usually starts automatically when you run `ollama` commands. If needed:
 ollama serve
 ```
 
-### 4. Run the web UI
+### 5. Run the web UI
 
 ```bash
 python src/app.py
@@ -98,7 +115,7 @@ python src/app.py
 python src/app.py --model llama3.1:latest
 ```
 
-### 5. Try a question
+### 6. Try a question
 
 Use the chat box or example prompts, e.g.:
 
@@ -135,11 +152,13 @@ User Question
 ### Web UI
 
 ```bash
-python src/app.py                              # llama3.2, in-memory Qdrant
-python src/app.py --model mistral              # Different Ollama model
-python src/app.py --storage ./qdrant_data      # Persist vectors between runs
-python src/app.py --port 8080                  # Custom port
-python src/app.py --data /path/to/docs         # Custom document folder
+python src/app.py                                       # llama3.2, Qdrant on http://localhost:6333
+python src/app.py --model mistral                       # Different Ollama model
+python src/app.py --storage :memory:                    # Embedded, no Docker, data lost on exit
+python src/app.py --storage ./qdrant_data               # Embedded file storage
+python src/app.py --storage http://localhost:6333       # Qdrant Docker server (default)
+python src/app.py --port 8080                           # Custom UI port
+python src/app.py --data /path/to/docs                  # Custom document folder
 ```
 
 ### Pre-ingest (large knowledge bases)
@@ -190,6 +209,7 @@ pytest tests/test_embedder.py -v   # downloads embedding model on first run
 rag-local-demo/
 ├── README.md
 ├── requirements.txt
+├── docker-compose.yml    # Qdrant container (with dashboard UI on :6333)
 ├── .gitignore
 ├── src/
 │   ├── embedder.py       # FastEmbed wrapper
@@ -210,7 +230,7 @@ rag-local-demo/
 | CLI flag | Default | Description |
 |----------|---------|-------------|
 | `--model` | `llama3.2` | Ollama model (must be installed: `ollama list`) |
-| `--storage` | `:memory:` | Qdrant path or `:memory:` |
+| `--storage` | `http://localhost:6333` | Qdrant server URL, a file path (e.g. `./qdrant_data`), or `:memory:` |
 | `--data` | `data/knowledge_base` | Folder of `.txt` files |
 | `--port` | `7860` | Gradio port |
 | `--share` | off | Public Gradio tunnel |
@@ -254,7 +274,18 @@ python -c "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-small-en
 **Reset persisted Qdrant data**
 
 ```bash
-rm -rf ./qdrant_data
+docker compose down -v       # if using the Docker server
+rm -rf ./qdrant_data         # if using embedded file storage
+```
+
+**Cannot reach Qdrant at http://localhost:6333**
+
+Make sure the container is running, or fall back to embedded storage:
+
+```bash
+docker compose up -d
+# or run without Docker:
+python src/app.py --storage :memory:
 ```
 
 **Gradio API errors**

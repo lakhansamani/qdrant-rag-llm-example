@@ -27,10 +27,19 @@ from src.pipeline import RAGPipeline
 # ── Defaults ─────────────────────────────────────────────────────────────────
 DATA_DIR = Path(__file__).parent.parent / "data" / "knowledge_base"
 DEFAULT_MODEL = "llama3.2"
-DEFAULT_STORAGE = ":memory:"      # Use "./qdrant_data" to persist between runs
+# Default to the Qdrant Docker container so users get the built-in dashboard UI
+# at http://localhost:6333/dashboard. Override with ":memory:" or "./qdrant_data".
+DEFAULT_STORAGE = "http://localhost:6333"
 
 
-def build_app(pipeline: RAGPipeline) -> gr.Blocks:
+def _qdrant_dashboard_url(storage: str) -> str | None:
+    """Return the dashboard URL when connected to a Qdrant HTTP server, else None."""
+    if storage.startswith(("http://", "https://")):
+        return storage.rstrip("/") + "/dashboard"
+    return None
+
+
+def build_app(pipeline: RAGPipeline, storage: str = DEFAULT_STORAGE) -> gr.Blocks:
     """
     Build and return the Gradio application.
 
@@ -39,17 +48,24 @@ def build_app(pipeline: RAGPipeline) -> gr.Blocks:
       2. Status — see how many documents are indexed
       3. About — brief explanation of what the system does
     """
+    dashboard_url = _qdrant_dashboard_url(storage)
 
     with gr.Blocks(title="🔍 Local RAG Knowledge Base") as demo:
 
         # ── Header ────────────────────────────────────────────────────────
-        gr.Markdown("""
+        header = """
         # 🔍 Local RAG Knowledge Base
         **Ask questions about your company's internal documents.**
         Everything runs locally — your data never leaves your machine.
 
         > 💡 *Powered by Qdrant (vector search) + FastEmbed (embeddings) + Ollama (LLM)*
-        """)
+        """
+        if dashboard_url:
+            header += (
+                f"\n> 🧭 *Inspect the embeddings in the Qdrant dashboard:* "
+                f"[{dashboard_url}]({dashboard_url})\n"
+            )
+        gr.Markdown(header)
 
         # ── Status bar ───────────────────────────────────────────────────
         with gr.Row():
@@ -202,7 +218,7 @@ def main():
     pipeline.ingest_directory(Path(args.data))
 
     # Build and launch the Gradio UI
-    app = build_app(pipeline)
+    app = build_app(pipeline, storage=args.storage)
     app.launch(
         server_port=args.port,
         share=args.share,

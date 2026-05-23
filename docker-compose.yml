@@ -1,0 +1,10 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: rag-local-demo-qdrant
+    ports:
+      - "6333:6333"   # REST API + built-in dashboard UI (http://localhost:6333/dashboard)
+      - "6334:6334"   # gRPC API
+    volumes:
+      - ./qdrant_data:/qdrant/storage
+    restart: unless-stopped

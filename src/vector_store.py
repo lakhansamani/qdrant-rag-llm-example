@@ -35,9 +35,10 @@ class VectorStore:
     """
     A simple vector store backed by Qdrant.
 
-    Supports two modes:
-      - ":memory:" → in-process, data lost on exit (great for tests & demos)
-      - path (str)  → local file storage, data persists between runs
+    Supports three modes:
+      - ":memory:"            → in-process, data lost on exit (great for tests)
+      - "http(s)://host:port" → connect to a running Qdrant server (Docker, cloud)
+      - path (str)            → local file storage, data persists between runs
 
     Example:
         store = VectorStore(collection="kb", vector_size=384)
@@ -58,17 +59,20 @@ class VectorStore:
         Args:
             collection:  Name of the Qdrant collection (like a DB table).
             vector_size: Dimensionality of the embedding vectors (must match your model).
-            path:        ":memory:" for in-process storage, or a file-system path for
+            path:        ":memory:" for in-process storage, a URL like
+                         "http://localhost:6333" to connect to a running Qdrant
+                         server (e.g. the official Docker image, which also serves
+                         the dashboard UI), or a file-system path for embedded
                          persistent storage (e.g. "./qdrant_data").
             distance:    Similarity metric. COSINE is recommended for text embeddings.
         """
         self.collection = collection
         self.vector_size = vector_size
 
-        # ":memory:" → QdrantClient(location=":memory:") runs entirely in-process.
-        # A path → QdrantClient(path=...) writes an on-disk Qdrant database.
         if path == ":memory:":
             self._client = QdrantClient(location=":memory:")
+        elif path.startswith(("http://", "https://")):
+            self._client = QdrantClient(url=path)
         else:
             Path(path).mkdir(parents=True, exist_ok=True)
             self._client = QdrantClient(path=path)
