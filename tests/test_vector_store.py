@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 
 from src.vector_store import VectorStore
-from src.retriever import Retriever, DocumentChunk, RetrievedChunk
+from src.retriever import Retriever, RetrievedChunk
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -160,6 +160,66 @@ class TestVectorStore:
 
         results = store.search(query_vector=v1, top_k=5, score_threshold=0.9)
         assert len(results) == 0  # Orthogonal vector has ~0 cosine similarity
+
+    def test_allowed_sources_restricts_candidates(self, store):
+        """Only chunks from allow-listed sources may be returned — even when a
+        forbidden chunk is the better vector match."""
+        v_secret = np.array([1.0, 0.0, 0.0, 0.0])
+        v_public = np.array([0.7, 0.7, 0.0, 0.0])  # worse match for the query
+
+        store.upsert(
+            vectors=[v_secret, v_public],
+            payloads=[
+                {"text": "secret", "source": "security_policy.txt", "chunk_index": 0},
+                {"text": "public", "source": "onboarding_guide.txt", "chunk_index": 0},
+            ],
+        )
+
+        results = store.search(
+            query_vector=v_secret,  # exact match for the FORBIDDEN doc
+            top_k=5,
+            allowed_sources=["onboarding_guide.txt"],
+        )
+        assert len(results) == 1
+        assert results[0].payload["source"] == "onboarding_guide.txt"
+
+    def test_empty_allowed_sources_returns_nothing(self, store):
+        """[] means 'may see nothing' — fail closed, no search executed."""
+        vec = np.array([1.0, 0.0, 0.0, 0.0])
+        store.upsert(
+            vectors=[vec],
+            payloads=[{"text": "doc", "source": "a.txt", "chunk_index": 0}],
+        )
+        assert store.search(query_vector=vec, top_k=5, allowed_sources=[]) == []
+
+    def test_none_allowed_sources_is_unrestricted(self, store):
+        """None preserves the original single-user behaviour."""
+        vec = np.array([1.0, 0.0, 0.0, 0.0])
+        store.upsert(
+            vectors=[vec],
+            payloads=[{"text": "doc", "source": "a.txt", "chunk_index": 0}],
+        )
+        results = store.search(query_vector=vec, top_k=5, allowed_sources=None)
+        assert len(results) == 1
+
+    def test_allowed_sources_combines_with_payload_filter(self, store):
+        """allow-list AND filter_by are both must-conditions."""
+        v1 = np.array([1.0, 0.0, 0.0, 0.0])
+        v2 = np.array([0.9, 0.1, 0.0, 0.0])
+        store.upsert(
+            vectors=[v1, v2],
+            payloads=[
+                {"text": "a", "source": "a.txt", "chunk_index": 0},
+                {"text": "b", "source": "b.txt", "chunk_index": 0},
+            ],
+        )
+        results = store.search(
+            query_vector=v1,
+            top_k=5,
+            filter_by={"source": "b.txt"},
+            allowed_sources=["a.txt"],  # contradicts filter_by → no results
+        )
+        assert results == []
 
     def test_upsert_custom_ids(self, store):
         """When custom IDs are provided (as valid UUIDs), they should be used."""

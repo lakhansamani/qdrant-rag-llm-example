@@ -20,7 +20,6 @@ Default endpoint: http://localhost:11434
 """
 
 import json
-from typing import Iterator
 import urllib.request
 import urllib.error
 

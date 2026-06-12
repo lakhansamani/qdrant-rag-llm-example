@@ -192,6 +192,60 @@ For PDF/DOCX, convert to text first (e.g. `pdfminer.six`).
 
 ---
 
+## Fine-grained permissions (FGA)
+
+The demo can run **permission-aware**: each user only retrieves — and therefore only
+gets answers from — documents they're allowed to see. Authorization is enforced
+*during* the Qdrant vector search (a payload filter built from the user's grants), so
+restricted chunks are never scored and never reach the LLM.
+
+> Powered by [Authorizer](https://github.com/authorizerdev/authorizer) (self-hosted
+> auth + embedded [OpenFGA](https://openfga.dev) engine). Requires Authorizer ≥ v2.3.0
+> — `docker-compose.yml` pins `quay.io/authorizer/authorizer:2.3.0-rc.2`.
+
+### Quick start
+
+```bash
+docker compose up -d              # Qdrant + Authorizer
+python scripts/fga_seed.py        # demo users, authorization model, grants
+python scripts/fga_demo.py        # CLI walk-through (no Ollama needed)
+python scripts/fga_demo.py --llm  # same, with generated answers via Ollama
+python src/app.py --authorizer http://localhost:8080   # web UI with login
+```
+
+The seed creates two users (password `Demo@Pass123`) with this access matrix:
+
+| document | `alice@example.com` | `bob@example.com` | why |
+|----------|------|------|-----|
+| `onboarding_guide.txt` | ✅ | ✅ | public (`user:*` viewer) |
+| `tech_stack.txt` | ✅ | ❌ | `team:engineering#member` viewer (alice is a member) |
+| `security_policy.txt` | ❌ | ❌ | `team:security#member` viewer (nobody is) |
+
+`fga_demo.py` also demonstrates **live revocation**: Bob is granted engineering
+membership (one tuple write) and immediately retrieves the tech-stack doc; the tuple
+is deleted and his very next question is filtered again. No re-ingestion, no re-login.
+
+### How it works
+
+1. **Login** — the app gets the user's JWT from Authorizer (`src/authz.py`).
+2. **Allow-list** — before searching, `list_permissions` returns every document the
+   user `can_view`. The call uses the *user's own token*; the subject is pinned
+   server-side, so a prompt-injected agent has nothing to escalate with.
+3. **Pre-filter** — the allow-list becomes a Qdrant `MatchAny` must-condition
+   (`src/vector_store.py`): forbidden vectors are never candidates and top-k stays
+   meaningful.
+4. **Re-verify** — after generation, the cited sources are batch-checked with
+   `check_permissions` so a grant revoked mid-request can't leak (`src/pipeline.py`).
+
+Every failure mode is **fail closed**: Authorizer unreachable, an expired token, or a
+truncated permission list all mean *no documents*, never *all documents*.
+
+Documents are FGA objects named after the chunk payload's `source` field
+(`document:tech_stack.txt`), so the existing Qdrant payload is the join key — no
+mapping table, and granting/revoking access never touches the vector index.
+
+---
+
 ## Running tests
 
 ```bash
@@ -213,13 +267,16 @@ rag-local-demo/
 ├── .gitignore
 ├── src/
 │   ├── embedder.py       # FastEmbed wrapper
-│   ├── vector_store.py   # Qdrant client
+│   ├── vector_store.py   # Qdrant client (incl. permission pre-filter)
 │   ├── retriever.py      # Chunking, ingest, search
 │   ├── llm_client.py     # Ollama HTTP client
+│   ├── authz.py          # Authorizer/OpenFGA permission client (FGA)
 │   ├── pipeline.py       # RAG orchestration
-│   └── app.py            # Gradio UI
+│   └── app.py            # Gradio UI (optional login via --authorizer)
 ├── data/knowledge_base/  # Sample .txt documents
 ├── scripts/ingest.py     # CLI pre-ingest
+├── scripts/fga_seed.py   # FGA demo setup: users, model, grants
+├── scripts/fga_demo.py   # FGA CLI walk-through incl. live revocation
 └── tests/
 ```
 
@@ -234,6 +291,7 @@ rag-local-demo/
 | `--data` | `data/knowledge_base` | Folder of `.txt` files |
 | `--port` | `7860` | Gradio port |
 | `--share` | off | Public Gradio tunnel |
+| `--authorizer` | off | Authorizer URL (e.g. `http://localhost:8080`) — enables login + fine-grained permissions |
 
 **`RAGPipeline` kwargs:** `chunk_size=400`, `chunk_overlap=80`, `top_k=4`, `score_threshold=0.3`, `embedding_model=BAAI/bge-small-en-v1.5`.
 

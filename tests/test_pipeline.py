@@ -12,9 +12,9 @@ Run with:
 
 import numpy as np
 import pytest
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
+from src.authz import AuthorizationError
 from src.pipeline import RAGPipeline, RAGResponse
 from src.retriever import RetrievedChunk
 
@@ -74,6 +74,7 @@ def pipeline():
     p = RAGPipeline.__new__(RAGPipeline)
     p.top_k = 4
     p.score_threshold = 0.0  # Accept all results in tests
+    p.authz = None           # No permission enforcement by default (legacy mode)
 
     mock_embedder = MockEmbedder()
 
@@ -183,3 +184,80 @@ class TestRAGPipeline:
 
         with pytest.raises(RuntimeError, match="Ollama is not running"):
             pipeline.ask("test question")
+
+
+# ── FGA (permission-aware) Pipeline Tests ─────────────────────────────────────
+
+class MockAuthz:
+    """Scriptable stand-in for AuthzClient."""
+
+    def __init__(self, allowed: list[str], verify: bool = True):
+        self._allowed = allowed
+        self._verify = verify
+        self.allowed_calls: list[str] = []
+        self.verify_calls: list[list[str]] = []
+
+    def allowed_documents(self, user_token: str) -> list[str]:
+        self.allowed_calls.append(user_token)
+        return list(self._allowed)
+
+    def verify_sources(self, user_token: str, sources: list[str]) -> bool:
+        self.verify_calls.append(list(sources))
+        return self._verify
+
+
+class TestFGAPipeline:
+    """ask() with an AuthzClient configured: enforcement, fail-closed, refusal."""
+
+    @pytest.fixture
+    def fga_pipeline(self, pipeline):
+        """The standard mocked pipeline, with two docs and authz enabled."""
+        pipeline.ingest_text("Security: MFA is mandatory.", "security_policy.txt")
+        pipeline.ingest_text("Onboarding: meet your buddy.", "onboarding_guide.txt")
+        return pipeline
+
+    def test_token_required_when_authz_configured(self, fga_pipeline):
+        """No silent bypass: authz configured + no token = error, not open query."""
+        fga_pipeline.authz = MockAuthz(allowed=["onboarding_guide.txt"])
+        with pytest.raises(AuthorizationError, match="requires the user's access token"):
+            fga_pipeline.ask("What is the security policy?")
+
+    def test_sources_restricted_to_allowed_documents(self, fga_pipeline):
+        """A user who can only view onboarding never gets security chunks."""
+        authz = MockAuthz(allowed=["onboarding_guide.txt"])
+        fga_pipeline.authz = authz
+        response = fga_pipeline.ask("Tell me everything", user_token="bob-jwt")
+
+        assert authz.allowed_calls == ["bob-jwt"]
+        assert response.sources, "expected at least one permitted chunk"
+        assert all(s.source == "onboarding_guide.txt" for s in response.sources)
+
+    def test_no_grants_refuses_without_calling_llm(self, fga_pipeline):
+        """Empty allow-list → refusal answer; the LLM must never be invoked."""
+        fga_pipeline.authz = MockAuthz(allowed=[])
+        fga_pipeline.llm.generate = MagicMock(side_effect=AssertionError("LLM called"))
+
+        response = fga_pipeline.ask("What is the security policy?", user_token="jwt")
+        assert response.sources == []
+        assert "don't have access" in response.answer
+
+    def test_revocation_mid_request_blocks_answer(self, fga_pipeline):
+        """If the post-generation re-check fails, the answer must not be returned."""
+        fga_pipeline.authz = MockAuthz(allowed=["onboarding_guide.txt"], verify=False)
+        with pytest.raises(AuthorizationError, match="revoked"):
+            fga_pipeline.ask("Tell me everything", user_token="jwt")
+
+    def test_cited_sources_are_reverified(self, fga_pipeline):
+        """The defense-in-depth check runs against the actually cited sources."""
+        authz = MockAuthz(allowed=["onboarding_guide.txt", "security_policy.txt"])
+        fga_pipeline.authz = authz
+        response = fga_pipeline.ask("Tell me everything", user_token="jwt")
+
+        assert len(authz.verify_calls) == 1
+        assert set(authz.verify_calls[0]) == {s.source for s in response.sources}
+
+    def test_no_authz_preserves_legacy_behaviour(self, fga_pipeline):
+        """Without an AuthzClient, ask() works exactly as before (no token needed)."""
+        assert fga_pipeline.authz is None
+        response = fga_pipeline.ask("What is the security policy?")
+        assert isinstance(response, RAGResponse)

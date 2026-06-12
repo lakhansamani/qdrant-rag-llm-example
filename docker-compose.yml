@@ -8,3 +8,28 @@ services:
     volumes:
       - ./qdrant_data:/qdrant/storage
     restart: unless-stopped
+
+  # Authorizer: self-hosted auth + embedded OpenFGA engine, used by the
+  # fine-grained-permissions demo (scripts/fga_seed.py, scripts/fga_demo.py).
+  # FGA needs Authorizer >= v2.3.0; override with AUTHORIZER_IMAGE if needed.
+  # Demo-only credentials below.
+  authorizer:
+    image: ${AUTHORIZER_IMAGE:-quay.io/authorizer/authorizer:2.3.0-rc.2}
+    container_name: rag-local-demo-authorizer
+    user: root
+    ports:
+      - "8080:8080"   # GraphQL API + login app (/app) + admin dashboard (/dashboard)
+    volumes:
+      - authorizer_data:/authorizer/data
+    command:
+      - --database-type=sqlite
+      - --database-url=/authorizer/data/data.db
+      - --client-id=123456
+      - --client-secret=secret
+      - --admin-secret=admin
+      - --jwt-type=HS256
+      - --jwt-secret=test
+    restart: unless-stopped
+
+volumes:
+  authorizer_data:

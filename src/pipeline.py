@@ -11,9 +11,10 @@ The pipeline implements the full RAG loop:
   Query → Embed query → Search Qdrant → Format context → Prompt LLM → Return answer
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
+from src.authz import AuthorizationError, AuthzClient
 from src.embedder import Embedder
 from src.vector_store import VectorStore
 from src.retriever import Retriever, RetrievedChunk
@@ -79,6 +80,7 @@ class RAGPipeline:
         chunk_overlap: int = 80,
         top_k: int = 4,
         score_threshold: float = 0.3,
+        authz: AuthzClient | None = None,
     ) -> None:
         """
         Args:
@@ -91,9 +93,15 @@ class RAGPipeline:
             chunk_overlap:   Overlap between consecutive chunks (preserves context).
             top_k:           Number of chunks to retrieve per query.
             score_threshold: Minimum cosine similarity for a chunk to be included.
+            authz:           Optional AuthzClient. When set, every ask() REQUIRES a
+                             user_token and retrieval is restricted to documents the
+                             token's subject can_view (enforced inside Qdrant's
+                             search). When None, the pipeline runs in the original
+                             single-user mode with no permission checks.
         """
         self.top_k = top_k
         self.score_threshold = score_threshold
+        self.authz = authz
 
         # Step 1: Initialise the embedding model (downloads on first run)
         print(f"Loading embedding model: {embedding_model}")
@@ -158,26 +166,57 @@ class RAGPipeline:
         question: str,
         source_filter: str | None = None,
         verbose: bool = False,
+        user_token: str | None = None,
     ) -> RAGResponse:
         """
         Ask a question and get an LLM answer grounded in the knowledge base.
 
         Full RAG loop:
-          1. Embed the question
-          2. Retrieve top-k relevant chunks from Qdrant
-          3. Format chunks as context
-          4. Build the LLM prompt (context + question)
-          5. Call Ollama to generate the answer
-          6. Return a structured RAGResponse
+          1. (FGA mode) Resolve the caller's document allow-list from Authorizer
+          2. Embed the question
+          3. Retrieve top-k relevant chunks from Qdrant — permission filter
+             applied DURING the vector search, so forbidden chunks are never
+             scored and never reach the prompt
+          4. Format chunks as context
+          5. Build the LLM prompt (context + question)
+          6. Call Ollama to generate the answer
+          7. (FGA mode) Re-verify cited sources before returning (a grant
+             revoked mid-request must not leak through stale retrieval)
 
         Args:
             question:      The user's question in natural language.
             source_filter: Optionally restrict search to one document (e.g. "security_policy.txt").
             verbose:       If True, print retrieved chunks before calling the LLM.
+            user_token:    The end user's Authorizer access token. REQUIRED when
+                           the pipeline was constructed with an AuthzClient;
+                           ignored otherwise.
 
         Returns:
             RAGResponse with the answer, sources, and metadata.
+
+        Raises:
+            AuthorizationError: In FGA mode, when no token is supplied or a
+                                permission decision cannot be made safely.
         """
+        # ── Step 0: Resolve permissions (FGA mode) ────────────────────────
+        # No silent bypass: if authorization is configured, a missing token is
+        # an error, not an unrestricted query.
+        allowed_sources: list[str] | None = None
+        if self.authz is not None:
+            if not user_token:
+                raise AuthorizationError(
+                    "authorization is enabled: ask() requires the user's access token"
+                )
+            allowed_sources = self.authz.allowed_documents(user_token)
+            if not allowed_sources:
+                return RAGResponse(
+                    question=question,
+                    answer="You don't have access to any documents that could answer this.",
+                    sources=[],
+                    context_used="",
+                    model_used=self.llm.model,
+                )
+
         if not self.llm.is_available():
             raise RuntimeError(
                 "Ollama is not running. Start it with: ollama serve\n"
@@ -190,6 +229,7 @@ class RAGPipeline:
             top_k=self.top_k,
             score_threshold=self.score_threshold,
             source_filter=source_filter,
+            allowed_sources=allowed_sources,
         )
 
         if verbose:
@@ -205,6 +245,14 @@ class RAGPipeline:
 
         # ── Step 4: Generate the LLM answer ───────────────────────────────
         answer = self.llm.generate(prompt=prompt)
+
+        # ── Step 5: Re-verify citations (FGA mode, defense in depth) ──────
+        if self.authz is not None and chunks:
+            sources = [c.source for c in chunks]
+            if not self.authz.verify_sources(user_token or "", sources):
+                raise AuthorizationError(
+                    "access to a cited document was revoked while answering"
+                )
 
         return RAGResponse(
             question=question,

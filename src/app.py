@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import gradio as gr
 
+from src.authz import AuthorizationError, AuthzClient
 from src.pipeline import RAGPipeline
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
@@ -39,7 +40,11 @@ def _qdrant_dashboard_url(storage: str) -> str | None:
     return None
 
 
-def build_app(pipeline: RAGPipeline, storage: str = DEFAULT_STORAGE) -> gr.Blocks:
+def build_app(
+    pipeline: RAGPipeline,
+    storage: str = DEFAULT_STORAGE,
+    authz: AuthzClient | None = None,
+) -> gr.Blocks:
     """
     Build and return the Gradio application.
 
@@ -47,6 +52,10 @@ def build_app(pipeline: RAGPipeline, storage: str = DEFAULT_STORAGE) -> gr.Block
       1. Chat — ask questions, see answers and sources
       2. Status — see how many documents are indexed
       3. About — brief explanation of what the system does
+
+    When `authz` is provided (--authorizer), a login row appears and every
+    question runs with the logged-in user's token: retrieval is restricted
+    to the documents that user can_view (see src/authz.py).
     """
     dashboard_url = _qdrant_dashboard_url(storage)
 
@@ -60,12 +69,47 @@ def build_app(pipeline: RAGPipeline, storage: str = DEFAULT_STORAGE) -> gr.Block
 
         > 💡 *Powered by Qdrant (vector search) + FastEmbed (embeddings) + Ollama (LLM)*
         """
+        if authz:
+            header += (
+                "\n> 🔐 *Fine-grained permissions enabled (Authorizer + OpenFGA):* "
+                "you only get answers from documents you may view.\n"
+            )
         if dashboard_url:
             header += (
                 f"\n> 🧭 *Inspect the embeddings in the Qdrant dashboard:* "
                 f"[{dashboard_url}]({dashboard_url})\n"
             )
         gr.Markdown(header)
+
+        # ── Login row (FGA mode only) ─────────────────────────────────────
+        token_state = gr.State("")
+        if authz:
+            with gr.Row():
+                email_box = gr.Textbox(
+                    label="Email", placeholder="bob@example.com", scale=2
+                )
+                password_box = gr.Textbox(
+                    label="Password", type="password", scale=2
+                )
+                login_btn = gr.Button("Log in 🔓", scale=1)
+                login_status = gr.Textbox(
+                    label="Session", value="Not logged in", interactive=False, scale=2
+                )
+
+            def do_login(email: str, password: str):
+                try:
+                    token = authz.login(email.strip(), password)
+                    allowed = authz.allowed_documents(token)
+                    docs = ", ".join(sorted(allowed)) if allowed else "no documents"
+                    return token, f"Logged in as {email.strip()} — may view: {docs}"
+                except AuthorizationError as e:
+                    return "", f"Login failed: {e}"
+
+            login_btn.click(
+                fn=do_login,
+                inputs=[email_box, password_box],
+                outputs=[token_state, login_status],
+            )
 
         # ── Status bar ───────────────────────────────────────────────────
         with gr.Row():
@@ -114,16 +158,18 @@ def build_app(pipeline: RAGPipeline, storage: str = DEFAULT_STORAGE) -> gr.Block
 
         # ── Event handlers ────────────────────────────────────────────────
 
-        def ask_question(question: str, history: list | None):
+        def ask_question(question: str, history: list | None, token: str):
             """Handle a user question: run RAG pipeline, update chat + sources."""
             messages = list(history or [])
             if not question.strip():
                 return messages, "*Please enter a question.*", ""
+            if authz and not token:
+                return messages, "*🔐 Please log in first (top of the page).*", question
 
             # Run the full RAG pipeline
             try:
-                response = pipeline.ask(question)
-            except (RuntimeError, ConnectionError) as e:
+                response = pipeline.ask(question, user_token=token or None)
+            except (RuntimeError, ConnectionError, AuthorizationError) as e:
                 error_msg = f"❌ {e}"
                 messages.extend(
                     [
@@ -159,12 +205,12 @@ def build_app(pipeline: RAGPipeline, storage: str = DEFAULT_STORAGE) -> gr.Block
         # Wire up events
         submit_btn.click(
             fn=ask_question,
-            inputs=[question_box, chatbot],
+            inputs=[question_box, chatbot, token_state],
             outputs=[chatbot, sources_panel, question_box],
         )
         question_box.submit(
             fn=ask_question,
-            inputs=[question_box, chatbot],
+            inputs=[question_box, chatbot, token_state],
             outputs=[chatbot, sources_panel, question_box],
         )
         refresh_btn.click(fn=refresh_status, outputs=doc_count)
@@ -204,12 +250,21 @@ def main():
     parser.add_argument("--data", default=str(DATA_DIR), help="Knowledge base directory")
     parser.add_argument("--port", type=int, default=7860, help="Gradio server port")
     parser.add_argument("--share", action="store_true", help="Create a public Gradio link")
+    parser.add_argument(
+        "--authorizer",
+        default=None,
+        help="Authorizer server URL (e.g. http://localhost:8080). Enables "
+             "fine-grained permissions: login required, retrieval restricted "
+             "to documents the user can_view. Seed first: python scripts/fga_seed.py",
+    )
     args = parser.parse_args()
 
     # Build the pipeline and ingest documents
+    authz = AuthzClient(args.authorizer) if args.authorizer else None
     pipeline = RAGPipeline(
         llm_model=args.model,
         storage_path=args.storage,
+        authz=authz,
     )
     try:
         pipeline.llm.ensure_model_available()
@@ -218,7 +273,7 @@ def main():
     pipeline.ingest_directory(Path(args.data))
 
     # Build and launch the Gradio UI
-    app = build_app(pipeline, storage=args.storage)
+    app = build_app(pipeline, storage=args.storage, authz=authz)
     app.launch(
         server_port=args.port,
         share=args.share,

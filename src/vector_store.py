@@ -26,8 +26,8 @@ from qdrant_client.models import (
     VectorParams,
     Filter,
     FieldCondition,
+    MatchAny,
     MatchValue,
-    QueryRequest,
 )
 
 
@@ -136,6 +136,7 @@ class VectorStore:
         top_k: int = 5,
         score_threshold: float = 0.0,
         filter_by: dict[str, Any] | None = None,
+        allowed_sources: list[str] | None = None,
     ) -> list[ScoredPoint]:
         """
         Find the most similar vectors to the query.
@@ -146,18 +147,33 @@ class VectorStore:
             score_threshold: Minimum cosine similarity score (0–1). Filter out low matches.
             filter_by:       Optional dict of payload key→value to filter results.
                              E.g. {"source": "security_policy.txt"} to search only that file.
+            allowed_sources: Permission allow-list for the "source" payload field.
+                             None  → no restriction (single-user / legacy mode).
+                             []    → caller may see nothing; returns [] without searching.
+                             [...] → only chunks from these sources are candidates —
+                                     the filter applies DURING the vector search, so
+                                     forbidden chunks are never scored and top_k stays
+                                     meaningful.
 
         Returns:
             List of ScoredPoint objects with .score, .payload, and .id.
         """
+        # An empty allow-list is a decision, not an absence of one: fail closed.
+        if allowed_sources is not None and not allowed_sources:
+            return []
+
         # Build a Qdrant payload filter if requested
-        qdrant_filter = None
+        conditions: list[Any] = []
+        if allowed_sources is not None:
+            conditions.append(
+                FieldCondition(key="source", match=MatchAny(any=allowed_sources))
+            )
         if filter_by:
-            conditions = [
+            conditions += [
                 FieldCondition(key=k, match=MatchValue(value=v))
                 for k, v in filter_by.items()
             ]
-            qdrant_filter = Filter(must=conditions)
+        qdrant_filter = Filter(must=conditions) if conditions else None
 
         # query_points replaces the deprecated .search() in qdrant-client >= 1.7
         result = self._client.query_points(

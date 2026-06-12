@@ -15,7 +15,6 @@ Why chunk instead of embedding whole documents?
 
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Iterator
 
 from src.embedder import Embedder
 from src.vector_store import VectorStore
@@ -192,6 +191,7 @@ class Retriever:
         top_k: int = 4,
         score_threshold: float = 0.3,
         source_filter: str | None = None,
+        allowed_sources: list[str] | None = None,
     ) -> list[RetrievedChunk]:
         """
         Find the most relevant document chunks for a given query.
@@ -206,6 +206,9 @@ class Retriever:
             top_k:           How many chunks to return.
             score_threshold: Minimum similarity score (0–1). Raise this to reduce noise.
             source_filter:   Optional: restrict search to a specific document filename.
+            allowed_sources: Optional permission allow-list of source filenames
+                             (see VectorStore.search). [] means "may see nothing"
+                             and returns no chunks; None means unrestricted.
 
         Returns:
             List of RetrievedChunk, sorted by similarity score (best first).
@@ -222,6 +225,7 @@ class Retriever:
             top_k=top_k,
             score_threshold=score_threshold,
             filter_by=filter_by,
+            allowed_sources=allowed_sources,
         )
 
         # Convert Qdrant ScoredPoint objects to our cleaner RetrievedChunk dataclass
