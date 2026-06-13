@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Authorizer FGA — login &amp; permissions test</title>
+  <!-- The official Authorizer browser SDK. -->
+  <script src="https://unpkg.com/@authorizerdev/authorizer-js/lib/authorizer.min.js"></script>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+    h1 { font-size: 1.4rem; }
+    button { font-size: 1rem; padding: 0.5rem 1rem; border-radius: 6px; border: 1px solid #888; cursor: pointer; }
+    .row { display: flex; gap: 0.5rem; align-items: center; margin: 1rem 0; flex-wrap: wrap; }
+    pre { background: #1113; padding: 1rem; border-radius: 8px; overflow: auto; }
+    .hide { display: none; }
+    code { background: #1113; padding: 0.1rem 0.3rem; border-radius: 4px; }
+    .ok { color: #16a34a; } .no { color: #dc2626; }
+  </style>
+</head>
+<body>
+  <h1>🔐 Authorizer FGA — login &amp; permissions test</h1>
+  <p>
+    Minimal page that consumes the Authorizer APIs directly: hosted-login via
+    <code>authorize()</code>, then <code>getProfile()</code>,
+    <code>listPermissions()</code>, and a batched <code>checkPermissions()</code>
+    against the demo's three documents. Seed first with
+    <code>python scripts/fga_seed.py</code> (users: <code>bob@example.com</code> /
+    <code>alice@example.com</code>, password <code>Demo@Pass123</code>).
+  </p>
+
+  <div class="row">
+    <span id="status">Checking session…</span>
+  </div>
+  <div class="row">
+    <button id="login" class="hide">Log in</button>
+    <button id="logout" class="hide">Log out</button>
+  </div>
+
+  <h2>Permissions</h2>
+  <pre id="output">—</pre>
+
+  <script type="text/javascript">
+    // The three documents in data/knowledge_base, as FGA objects.
+    const DOCUMENTS = [
+      'document:onboarding_guide.txt',
+      'document:tech_stack.txt',
+      'document:security_policy.txt',
+    ];
+
+    const authorizerRef = new authorizerdev.Authorizer({
+      authorizerURL: 'http://localhost:8080',
+      redirectURL: window.location.origin + window.location.pathname,
+      clientID: '123456', // value of the server's --client-id flag
+    });
+
+    const $ = (id) => document.getElementById(id);
+    const unwrap = (res) => (res && res.data) ? res.data : res; // SDK wraps in {data}
+
+    $('login').addEventListener('click', async () => {
+      // Redirects to the Authorizer-hosted login page when there is no session.
+      await authorizerRef.authorize({ response_type: 'code', use_refresh_token: false });
+    });
+
+    $('logout').addEventListener('click', async () => {
+      await authorizerRef.logout();
+      window.location.href = window.location.pathname;
+    });
+
+    async function loadPermissions(token) {
+      const auth = { Authorization: `Bearer ${token}` };
+
+      // 1. list_permissions — everything this user can_view, type "document".
+      const listRes = await authorizerRef.listPermissions(
+        { relation: 'can_view', object_type: 'document' }, auth);
+      const list = unwrap(listRes) || {};
+
+      // 2. check_permissions — batched yes/no over all three documents.
+      const checkRes = await authorizerRef.checkPermissions(
+        { checks: DOCUMENTS.map((object) => ({ relation: 'can_view', object })) }, auth);
+      const check = unwrap(checkRes) || {};
+
+      const lines = [];
+      lines.push('list_permissions →');
+      lines.push('  objects:   ' + JSON.stringify(list.objects || []));
+      lines.push('  truncated: ' + JSON.stringify(list.truncated));
+      lines.push('');
+      lines.push('check_permissions →');
+      for (const r of (check.results || [])) {
+        const mark = r.allowed ? '✅ ALLOW' : '❌ DENY ';
+        lines.push(`  ${mark}  ${r.object}`);
+      }
+      $('output').textContent = lines.join('\n');
+    }
+
+    async function onLoad() {
+      try {
+        // Silent token fetch for an existing session; does NOT redirect here
+        // because we pass no flow — use the button to start an interactive login.
+        const res = await authorizerRef.getSession();
+        const session = unwrap(res) || {};
+        const token = session.access_token;
+        if (token) {
+          const prof = unwrap(await authorizerRef.getProfile({ Authorization: `Bearer ${token}` })) || {};
+          $('status').innerHTML = `Logged in as <b>${prof.email || 'user'}</b>`;
+          $('logout').classList.remove('hide');
+          $('login').classList.add('hide');
+          await loadPermissions(token);
+          return;
+        }
+      } catch (e) {
+        console.error('session check failed', e);
+      }
+      $('status').textContent = 'Not logged in';
+      $('login').classList.remove('hide');
+      $('logout').classList.add('hide');
+    }
+
+    onLoad();
+  </script>
+</body>
+</html>

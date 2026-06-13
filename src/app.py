@@ -44,6 +44,7 @@ def build_app(
     pipeline: RAGPipeline,
     storage: str = DEFAULT_STORAGE,
     authz: AuthzClient | None = None,
+    client_id: str = "",
 ) -> gr.Blocks:
     """
     Build and return the Gradio application.
@@ -53,9 +54,12 @@ def build_app(
       2. Status — see how many documents are indexed
       3. About — brief explanation of what the system does
 
-    When `authz` is provided (--authorizer), a login row appears and every
-    question runs with the logged-in user's token: retrieval is restricted
-    to the documents that user can_view (see src/authz.py).
+    When `authz` is provided (--authorizer), login is enforced via
+    Authorizer's hosted login page (authorizer-js `authorize()` redirects
+    there automatically when no session exists) and every question runs
+    with the logged-in user's token: retrieval is restricted to the
+    documents that user can_view (see src/authz.py). A manual
+    email/password fallback is available for offline use.
     """
     dashboard_url = _qdrant_dashboard_url(storage)
 
@@ -81,35 +85,91 @@ def build_app(
             )
         gr.Markdown(header)
 
-        # ── Login row (FGA mode only) ─────────────────────────────────────
+        # ── Login (FGA mode only) ─────────────────────────────────────────
+        # Primary flow: Authorizer's hosted login page via authorizer-js.
+        # On page load, authorize() silently fetches a token for an existing
+        # session, or REDIRECTS the browser to the hosted login page when
+        # there is none — no credential fields to build or secure here.
         token_state = gr.State("")
         if authz:
             with gr.Row():
-                email_box = gr.Textbox(
-                    label="Email", placeholder="bob@example.com", scale=2
-                )
-                password_box = gr.Textbox(
-                    label="Password", type="password", scale=2
-                )
-                login_btn = gr.Button("Log in 🔓", scale=1)
                 login_status = gr.Textbox(
-                    label="Session", value="Not logged in", interactive=False, scale=2
+                    label="Session", value="Checking session…",
+                    interactive=False, scale=4,
                 )
+                logout_btn = gr.Button("Log out 🔒", scale=1)
 
-            def do_login(email: str, password: str):
-                try:
-                    token = authz.login(email.strip(), password)
-                    allowed = authz.allowed_documents(token)
-                    docs = ", ".join(sorted(allowed)) if allowed else "no documents"
-                    return token, f"Logged in as {email.strip()} — may view: {docs}"
-                except AuthorizationError as e:
-                    return "", f"Login failed: {e}"
+            login_js = f"""
+            async () => {{
+              try {{
+                const ref = new authorizerdev.Authorizer({{
+                  authorizerURL: '{authz.base_url}',
+                  redirectURL: window.location.origin + window.location.pathname,
+                  clientID: '{client_id}',
+                }});
+                // Redirects to the hosted login page when no session exists.
+                const res = await ref.authorize({{
+                  response_type: 'code',
+                  use_refresh_token: false,
+                }});
+                const payload = (res && res.data) || res || {{}};
+                const token = payload.access_token;
+                if (token) {{
+                  const prof = await ref.getProfile({{
+                    Authorization: 'Bearer ' + token,
+                  }});
+                  const email = ((prof && prof.data) || prof || {{}}).email || 'user';
+                  return [token, 'Logged in as ' + email];
+                }}
+              }} catch (e) {{
+                console.error('authorizer login failed', e);
+              }}
+              return ['', 'Not logged in — use the manual login below if offline'];
+            }}
+            """
+            demo.load(None, inputs=None, outputs=[token_state, login_status], js=login_js)
 
-            login_btn.click(
-                fn=do_login,
-                inputs=[email_box, password_box],
-                outputs=[token_state, login_status],
-            )
+            logout_js = f"""
+            async () => {{
+              try {{
+                const ref = new authorizerdev.Authorizer({{
+                  authorizerURL: '{authz.base_url}',
+                  redirectURL: window.location.origin + window.location.pathname,
+                  clientID: '{client_id}',
+                }});
+                await ref.logout();
+              }} catch (e) {{}}
+              window.location.reload();
+            }}
+            """
+            logout_btn.click(None, inputs=None, outputs=None, js=logout_js)
+
+            # Offline fallback: direct email/password login against /graphql
+            # (no CDN, no redirect — useful for air-gapped demos).
+            with gr.Accordion("Manual login (offline fallback)", open=False):
+                with gr.Row():
+                    email_box = gr.Textbox(
+                        label="Email", placeholder="bob@example.com", scale=2
+                    )
+                    password_box = gr.Textbox(
+                        label="Password", type="password", scale=2
+                    )
+                    login_btn = gr.Button("Log in 🔓", scale=1)
+
+                def do_login(email: str, password: str):
+                    try:
+                        token = authz.login(email.strip(), password)
+                        allowed = authz.allowed_documents(token)
+                        docs = ", ".join(sorted(allowed)) if allowed else "no documents"
+                        return token, f"Logged in as {email.strip()} — may view: {docs}"
+                    except AuthorizationError as e:
+                        return "", f"Login failed: {e}"
+
+                login_btn.click(
+                    fn=do_login,
+                    inputs=[email_box, password_box],
+                    outputs=[token_state, login_status],
+                )
 
         # ── Status bar ───────────────────────────────────────────────────
         with gr.Row():
@@ -257,6 +317,12 @@ def main():
              "fine-grained permissions: login required, retrieval restricted "
              "to documents the user can_view. Seed first: python scripts/fga_seed.py",
     )
+    parser.add_argument(
+        "--client-id",
+        default="123456",
+        help="Authorizer client id for the hosted login flow "
+             "(value of the server's --client-id flag; see docker-compose.yml)",
+    )
     args = parser.parse_args()
 
     # Build the pipeline and ingest documents
@@ -273,12 +339,23 @@ def main():
     pipeline.ingest_directory(Path(args.data))
 
     # Build and launch the Gradio UI
-    app = build_app(pipeline, storage=args.storage, authz=authz)
+    app = build_app(
+        pipeline, storage=args.storage, authz=authz, client_id=args.client_id
+    )
+    # In FGA mode, load authorizer-js from the CDN so the browser can run the
+    # hosted-login flow. Passed to launch() (Gradio 6 moved `head` here).
+    head_html = (
+        '<script src="https://unpkg.com/@authorizerdev/authorizer-js/'
+        'lib/authorizer.min.js"></script>'
+        if authz
+        else None
+    )
     app.launch(
         server_port=args.port,
         share=args.share,
         show_error=True,
         inbrowser=True,       # Auto-open the browser
+        head=head_html,
         theme=gr.themes.Soft(
             primary_hue="blue",
             secondary_hue="slate",

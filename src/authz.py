@@ -1,56 +1,49 @@
 """
 authz.py
 --------
-Fine-grained authorization (FGA) client for Authorizer's embedded OpenFGA engine.
+Fine-grained authorization (FGA) gateway, built on the official Authorizer
+Python SDK (authorizer-py: https://github.com/authorizerdev/authorizer-py).
 
-Authorizer (https://github.com/authorizerdev/authorizer) is an open-source,
-self-hosted auth server that embeds OpenFGA — the open-source implementation of
-Google's Zanzibar relationship-based access control (ReBAC). This module is the
+Authorizer embeds OpenFGA — the open-source implementation of Google's Zanzibar
+relationship-based access control (ReBAC). This module is the thin, fail-closed
 bridge between the RAG pipeline and that permission engine:
 
+    login(email, password)    → an access token for the user.
     allowed_documents(token)  → which documents may THIS user retrieve?
     verify_sources(token, …)  → double-check citations before showing them.
 
-Both calls authenticate with the END USER's token, never an admin key. The
-server pins the permission subject from the token, so a prompt-injected agent
-has no credential to escalate with — it asks as the user, it gets the user's
-answer.
+The two permission calls authenticate with the END USER's token, never an admin
+key. The server pins the permission subject from the token, so a prompt-injected
+agent has no credential to escalate with — it asks as the user, it gets the
+user's answer.
 
 Every failure mode here is FAIL CLOSED: a network error, a GraphQL error, or a
 truncated permission list raises AuthorizationError (or returns False for
 verify_sources). "Auth is down" must never degrade to "everything is visible".
 
-Uses only Python's built-in urllib — no extra dependencies required.
+The SDK already sends the CSRF `Origin` header required by Authorizer >= v2.3.0
+(defaulting to the server's own origin), so server-side calls are not rejected.
 """
 
-import json
-import urllib.error
-import urllib.request
-from typing import Any
+from authorizer import (
+    AuthorizerClient,
+    CheckPermissionsRequest,
+    ListPermissionsRequest,
+    LoginRequest,
+    PermissionCheckInput,
+)
+from authorizer.exceptions import AuthorizerError
 
 # The default Authorizer server address. See docker-compose.yml.
 AUTHORIZER_BASE_URL = "http://localhost:8080"
+# The demo's client id (value of the server's --client-id flag).
+DEFAULT_CLIENT_ID = "123456"
 
 # Documents are modelled as FGA objects named after the chunk payload's
 # `source` field (the filename), e.g. "document:security_policy.txt".
 # This makes the Qdrant payload the exact join key — no mapping table.
 DOCUMENT_TYPE = "document"
 VIEW_RELATION = "can_view"
-
-_LOGIN_MUTATION = """
-mutation login($params: LoginRequest!) {
-  login(params: $params) { access_token }
-}"""
-
-_LIST_PERMISSIONS_QUERY = """
-query listPermissions($params: ListPermissionsInput!) {
-  list_permissions(params: $params) { objects truncated }
-}"""
-
-_CHECK_PERMISSIONS_QUERY = """
-query checkPermissions($params: CheckPermissionsInput!) {
-  check_permissions(params: $params) { results { relation object allowed } }
-}"""
 
 
 class AuthorizationError(Exception):
@@ -59,64 +52,26 @@ class AuthorizationError(Exception):
 
 class AuthzClient:
     """
-    Talks to an Authorizer server's GraphQL API for login and FGA checks.
+    Wraps the Authorizer Python SDK for login and FGA checks.
 
     Example:
         authz = AuthzClient()                      # http://localhost:8080
-        token = authz.login("bob@example.com", "Password@123")
+        token = authz.login("bob@example.com", "Demo@Pass123")
         authz.allowed_documents(token)             # ["onboarding_guide.txt"]
     """
 
     def __init__(
         self,
         base_url: str = AUTHORIZER_BASE_URL,
-        timeout: float = 10.0,
+        client_id: str = DEFAULT_CLIENT_ID,
     ) -> None:
         """
         Args:
-            base_url: URL of the Authorizer server (the GraphQL endpoint is
-                      derived as <base_url>/graphql).
-            timeout:  Per-request timeout in seconds.
+            base_url:  URL of the Authorizer server.
+            client_id: Authorizer client id (value of the server's --client-id).
         """
         self.base_url = base_url.rstrip("/")
-        self.timeout = timeout
-
-    # ── Internal helpers ────────────────────────────────────────────────────
-
-    def _graphql(
-        self,
-        query: str,
-        variables: dict[str, Any],
-        token: str | None = None,
-    ) -> dict[str, Any]:
-        """
-        POST a GraphQL request and return the `data` object.
-
-        Raises:
-            AuthorizationError: On any transport or GraphQL error. Callers must
-                                treat this as "no access", never "all access".
-        """
-        payload = json.dumps({"query": query, "variables": variables}).encode("utf-8")
-        request = urllib.request.Request(
-            f"{self.base_url}/graphql",
-            data=payload,
-            headers={
-                "Content-Type": "application/json",
-                # Authorizer's CSRF guard requires Origin/Referer on POSTs.
-                "Origin": self.base_url,
-                **({"Authorization": f"Bearer {token}"} if token else {}),
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                body = json.loads(response.read().decode("utf-8"))
-        except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
-            raise AuthorizationError(f"Authorizer unreachable: {e}") from e
-
-        if body.get("errors"):
-            raise AuthorizationError(body["errors"][0].get("message", "GraphQL error"))
-        return body.get("data") or {}
+        self._client = AuthorizerClient(client_id, self.base_url)
 
     # ── Public API ──────────────────────────────────────────────────────────
 
@@ -124,24 +79,16 @@ class AuthzClient:
         """
         Authenticate a user and return their access token.
 
-        Args:
-            email:    The user's email address.
-            password: The user's password.
-
-        Returns:
-            A JWT access token to pass to allowed_documents / verify_sources.
-
         Raises:
             AuthorizationError: On bad credentials or an unreachable server.
         """
-        data = self._graphql(
-            _LOGIN_MUTATION,
-            {"params": {"email": email, "password": password}},
-        )
-        token = (data.get("login") or {}).get("access_token")
-        if not token:
+        try:
+            res = self._client.login(LoginRequest(email=email, password=password))
+        except AuthorizerError as e:
+            raise AuthorizationError(str(e)) from e
+        if not res.access_token:
             raise AuthorizationError("login succeeded but returned no access token")
-        return token
+        return res.access_token
 
     def allowed_documents(self, user_token: str) -> list[str]:
         """
@@ -164,18 +111,24 @@ class AuthzClient:
                                 truncated (a partial allow-list must not be
                                 mistaken for the full one).
         """
-        data = self._graphql(
-            _LIST_PERMISSIONS_QUERY,
-            {"params": {"relation": VIEW_RELATION, "object_type": DOCUMENT_TYPE}},
-            token=user_token,
-        )
-        result = data.get("list_permissions") or {}
-        if result.get("truncated"):
+        try:
+            res = self._client.list_permissions(
+                ListPermissionsRequest(
+                    relation=VIEW_RELATION, object_type=DOCUMENT_TYPE
+                ),
+                headers=self._bearer(user_token),
+            )
+        except AuthorizerError as e:
+            raise AuthorizationError(str(e)) from e
+        if res.truncated:
             raise AuthorizationError(
                 "permission list truncated (>1000 grants); refusing partial view"
             )
         prefix = f"{DOCUMENT_TYPE}:"
-        return [o.removeprefix(prefix) for o in result.get("objects") or []]
+        return [
+            o[len(prefix):] if o.startswith(prefix) else o
+            for o in res.objects
+        ]
 
     def verify_sources(self, user_token: str, sources: list[str]) -> bool:
         """
@@ -193,19 +146,28 @@ class AuthzClient:
         """
         if not sources:
             return True
+        unique = sorted(set(sources))
         checks = [
-            {"relation": VIEW_RELATION, "object": f"{DOCUMENT_TYPE}:{s}"}
-            for s in sorted(set(sources))
+            PermissionCheckInput(relation=VIEW_RELATION, object=f"{DOCUMENT_TYPE}:{s}")
+            for s in unique
         ]
         try:
-            data = self._graphql(
-                _CHECK_PERMISSIONS_QUERY,
-                {"params": {"checks": checks}},
-                token=user_token,
+            res = self._client.check_permissions(
+                CheckPermissionsRequest(checks=checks),
+                headers=self._bearer(user_token),
             )
-        except AuthorizationError:
+        except AuthorizerError:
             return False
-        results = (data.get("check_permissions") or {}).get("results") or []
-        if len(results) != len(checks):
+        if len(res.results) != len(checks):
             return False
-        return all(r.get("allowed") is True for r in results)
+        return all(r.allowed is True for r in res.results)
+
+    def close(self) -> None:
+        """Release the underlying SDK HTTP client."""
+        self._client.close()
+
+    # ── Internal helpers ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _bearer(token: str) -> dict[str, str]:
+        return {"Authorization": f"Bearer {token}"}

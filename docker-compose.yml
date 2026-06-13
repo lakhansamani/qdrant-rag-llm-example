@@ -29,6 +29,10 @@ services:
       - --admin-secret=admin
       - --jwt-type=HS256
       - --jwt-secret=test
+      # Browser logins run from a different origin than Authorizer (the Gradio
+      # UI on :7860, the standalone test page on :9000). The CSRF guard rejects
+      # cross-origin POSTs unless those origins are explicitly allow-listed.
+      - --allowed-origins=http://localhost:7860,http://localhost:7861,http://localhost:9000,http://localhost:8080
     restart: unless-stopped
 
 volumes:

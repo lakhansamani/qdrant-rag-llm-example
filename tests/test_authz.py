@@ -1,164 +1,167 @@
 """
 tests/test_authz.py
 -------------------
-Unit tests for the AuthzClient (Authorizer / OpenFGA permission gateway).
+Unit tests for the AuthzClient FGA wrapper around the official Authorizer
+Python SDK (authorizer-py).
 
-These tests mock the HTTP layer — no Authorizer server is needed. They pin
+These tests inject a fake SDK client — no Authorizer server is needed. They pin
 down the property the whole feature rests on: every failure mode is FAIL
-CLOSED. An unreachable server, a GraphQL error, a truncated permission list,
-or a short result set must never widen access.
+CLOSED. A server error, an SDK exception, a truncated permission list, or a
+short result set must never widen access.
 
 Run with:
     pytest tests/test_authz.py -v
 """
 
-import io
-import json
-import urllib.error
-from contextlib import contextmanager
-from unittest.mock import patch
-
 import pytest
+
+from authorizer.exceptions import AuthorizerConnectionError, AuthorizerError
+from authorizer.types import (
+    AuthToken,
+    CheckPermissionsResponse,
+    ListPermissionsResponse,
+    PermissionCheckResult,
+)
 
 from src.authz import AuthorizationError, AuthzClient
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Fake SDK client ─────────────────────────────────────────────────────────
 
-def _http_response(body: dict):
-    """Build a context-manager mimicking urllib's HTTP response object."""
-    @contextmanager
-    def _cm(*args, **kwargs):
-        yield io.BytesIO(json.dumps(body).encode("utf-8"))
-    return _cm
+class FakeSDK:
+    """Stand-in for authorizer.AuthorizerClient. Scriptable per method."""
+
+    def __init__(self, *, login=None, list_resp=None, check_resp=None, raises=None):
+        self._login = login
+        self._list = list_resp
+        self._check = check_resp
+        self._raises = raises  # an AuthorizerError instance to raise, or None
+        self.list_headers = None
+        self.check_headers = None
+
+    def login(self, req):
+        if isinstance(self._raises, AuthorizerError):
+            raise self._raises
+        return self._login
+
+    def list_permissions(self, req, headers=None):
+        self.list_headers = headers
+        if isinstance(self._raises, AuthorizerError):
+            raise self._raises
+        return self._list
+
+    def check_permissions(self, req, headers=None):
+        self.check_headers = headers
+        if isinstance(self._raises, AuthorizerError):
+            raise self._raises
+        return self._check
 
 
-def _patch_urlopen(body: dict):
-    """Patch urllib.request.urlopen inside src.authz to return `body` as JSON."""
-    return patch("src.authz.urllib.request.urlopen", new=_http_response(body))
-
-
-@pytest.fixture
-def client():
-    return AuthzClient(base_url="http://localhost:8080")
+def make_client(**fake_kwargs):
+    """Build an AuthzClient with its SDK client replaced by a FakeSDK."""
+    c = AuthzClient(base_url="http://localhost:8080")
+    c._client = FakeSDK(**fake_kwargs)
+    return c
 
 
 # ── login ─────────────────────────────────────────────────────────────────────
 
 class TestLogin:
 
-    def test_login_returns_access_token(self, client):
-        body = {"data": {"login": {"access_token": "jwt-123"}}}
-        with _patch_urlopen(body):
-            assert client.login("a@example.com", "pw") == "jwt-123"
+    def test_login_returns_access_token(self):
+        c = make_client(login=AuthToken(access_token="jwt-123"))
+        assert c.login("a@example.com", "pw") == "jwt-123"
 
-    def test_login_bad_credentials_raises(self, client):
-        body = {"errors": [{"message": "bad user credentials"}]}
-        with _patch_urlopen(body), pytest.raises(AuthorizationError, match="credentials"):
-            client.login("a@example.com", "wrong")
+    def test_login_bad_credentials_raises(self):
+        c = make_client(raises=AuthorizerError("bad user credentials"))
+        with pytest.raises(AuthorizationError, match="credentials"):
+            c.login("a@example.com", "wrong")
 
-    def test_login_missing_token_raises(self, client):
-        body = {"data": {"login": {}}}
-        with _patch_urlopen(body), pytest.raises(AuthorizationError, match="no access token"):
-            client.login("a@example.com", "pw")
+    def test_login_missing_token_raises(self):
+        c = make_client(login=AuthToken(access_token=None))
+        with pytest.raises(AuthorizationError, match="no access token"):
+            c.login("a@example.com", "pw")
 
 
 # ── allowed_documents ────────────────────────────────────────────────────────
 
 class TestAllowedDocuments:
 
-    def test_strips_document_prefix(self, client):
-        body = {"data": {"list_permissions": {
-            "objects": ["document:onboarding_guide.txt", "document:tech_stack.txt"],
-            "truncated": False,
-        }}}
-        with _patch_urlopen(body):
-            assert client.allowed_documents("jwt") == [
-                "onboarding_guide.txt", "tech_stack.txt",
-            ]
+    def test_strips_document_prefix(self):
+        c = make_client(list_resp=ListPermissionsResponse(
+            objects=["document:onboarding_guide.txt", "document:tech_stack.txt"],
+            truncated=False,
+        ))
+        assert c.allowed_documents("jwt") == ["onboarding_guide.txt", "tech_stack.txt"]
 
-    def test_empty_grant_list_is_valid_not_error(self, client):
+    def test_empty_grant_list_is_valid_not_error(self):
         """No grants is an enforceable answer (deny all), not a failure."""
-        body = {"data": {"list_permissions": {"objects": [], "truncated": False}}}
-        with _patch_urlopen(body):
-            assert client.allowed_documents("jwt") == []
+        c = make_client(list_resp=ListPermissionsResponse(objects=[], truncated=False))
+        assert c.allowed_documents("jwt") == []
 
-    def test_truncated_list_fails_closed(self, client):
+    def test_truncated_list_fails_closed(self):
         """A partial allow-list must never be mistaken for the full one."""
-        body = {"data": {"list_permissions": {
-            "objects": ["document:a.txt"], "truncated": True,
-        }}}
-        with _patch_urlopen(body), pytest.raises(AuthorizationError, match="truncated"):
-            client.allowed_documents("jwt")
+        c = make_client(list_resp=ListPermissionsResponse(
+            objects=["document:a.txt"], truncated=True,
+        ))
+        with pytest.raises(AuthorizationError, match="truncated"):
+            c.allowed_documents("jwt")
 
-    def test_graphql_error_fails_closed(self, client):
-        body = {"errors": [{"message": "unauthorized"}]}
-        with _patch_urlopen(body), pytest.raises(AuthorizationError):
-            client.allowed_documents("expired-jwt")
+    def test_sdk_error_fails_closed(self):
+        c = make_client(raises=AuthorizerError("unauthorized"))
+        with pytest.raises(AuthorizationError):
+            c.allowed_documents("expired-jwt")
 
-    def test_server_unreachable_fails_closed(self, client):
-        def _raise(*args, **kwargs):
-            raise urllib.error.URLError("connection refused")
-        with patch("src.authz.urllib.request.urlopen", new=_raise):
-            with pytest.raises(AuthorizationError, match="unreachable"):
-                client.allowed_documents("jwt")
+    def test_server_unreachable_fails_closed(self):
+        """'Auth is down' must raise, never degrade to an open query."""
+        c = make_client(raises=AuthorizerConnectionError("connection refused"))
+        with pytest.raises(AuthorizationError):
+            c.allowed_documents("jwt")
 
-    def test_sends_user_token_as_bearer_header(self, client):
+    def test_sends_user_token_as_bearer_header(self):
         """The permission call must carry the END USER's token."""
-        captured = {}
-
-        @contextmanager
-        def _capture(request, timeout=None):
-            captured["auth"] = request.get_header("Authorization")
-            body = {"data": {"list_permissions": {"objects": [], "truncated": False}}}
-            yield io.BytesIO(json.dumps(body).encode("utf-8"))
-
-        with patch("src.authz.urllib.request.urlopen", new=_capture):
-            client.allowed_documents("user-jwt")
-        assert captured["auth"] == "Bearer user-jwt"
+        c = make_client(list_resp=ListPermissionsResponse(objects=[], truncated=False))
+        c.allowed_documents("user-jwt")
+        assert c._client.list_headers == {"Authorization": "Bearer user-jwt"}
 
 
 # ── verify_sources ───────────────────────────────────────────────────────────
 
 class TestVerifySources:
 
-    def test_all_allowed_returns_true(self, client):
-        body = {"data": {"check_permissions": {"results": [
-            {"relation": "can_view", "object": "document:a.txt", "allowed": True},
-            {"relation": "can_view", "object": "document:b.txt", "allowed": True},
-        ]}}}
-        with _patch_urlopen(body):
-            assert client.verify_sources("jwt", ["a.txt", "b.txt"]) is True
+    def test_all_allowed_returns_true(self):
+        c = make_client(check_resp=CheckPermissionsResponse(results=[
+            PermissionCheckResult(relation="can_view", object="document:a.txt", allowed=True),
+            PermissionCheckResult(relation="can_view", object="document:b.txt", allowed=True),
+        ]))
+        assert c.verify_sources("jwt", ["a.txt", "b.txt"]) is True
 
-    def test_one_denied_returns_false(self, client):
-        body = {"data": {"check_permissions": {"results": [
-            {"relation": "can_view", "object": "document:a.txt", "allowed": True},
-            {"relation": "can_view", "object": "document:b.txt", "allowed": False},
-        ]}}}
-        with _patch_urlopen(body):
-            assert client.verify_sources("jwt", ["a.txt", "b.txt"]) is False
+    def test_one_denied_returns_false(self):
+        c = make_client(check_resp=CheckPermissionsResponse(results=[
+            PermissionCheckResult(relation="can_view", object="document:a.txt", allowed=True),
+            PermissionCheckResult(relation="can_view", object="document:b.txt", allowed=False),
+        ]))
+        assert c.verify_sources("jwt", ["a.txt", "b.txt"]) is False
 
-    def test_error_returns_false_not_raise(self, client):
+    def test_error_returns_false_not_raise(self):
         """Post-generation check degrades to deny, never to allow."""
-        body = {"errors": [{"message": "fga is not enabled"}]}
-        with _patch_urlopen(body):
-            assert client.verify_sources("jwt", ["a.txt"]) is False
+        c = make_client(raises=AuthorizerError("fga is not enabled"))
+        assert c.verify_sources("jwt", ["a.txt"]) is False
 
-    def test_short_result_set_returns_false(self, client):
+    def test_short_result_set_returns_false(self):
         """Fewer results than checks must not pass silently."""
-        body = {"data": {"check_permissions": {"results": [
-            {"relation": "can_view", "object": "document:a.txt", "allowed": True},
-        ]}}}
-        with _patch_urlopen(body):
-            assert client.verify_sources("jwt", ["a.txt", "b.txt"]) is False
+        c = make_client(check_resp=CheckPermissionsResponse(results=[
+            PermissionCheckResult(relation="can_view", object="document:a.txt", allowed=True),
+        ]))
+        assert c.verify_sources("jwt", ["a.txt", "b.txt"]) is False
 
-    def test_duplicate_sources_checked_once(self, client):
+    def test_duplicate_sources_checked_once(self):
         """Chunks from the same document produce a single check."""
-        body = {"data": {"check_permissions": {"results": [
-            {"relation": "can_view", "object": "document:a.txt", "allowed": True},
-        ]}}}
-        with _patch_urlopen(body):
-            assert client.verify_sources("jwt", ["a.txt", "a.txt", "a.txt"]) is True
+        c = make_client(check_resp=CheckPermissionsResponse(results=[
+            PermissionCheckResult(relation="can_view", object="document:a.txt", allowed=True),
+        ]))
+        assert c.verify_sources("jwt", ["a.txt", "a.txt", "a.txt"]) is True
 
-    def test_no_sources_is_trivially_true(self, client):
-        assert client.verify_sources("jwt", []) is True
+    def test_no_sources_is_trivially_true(self):
+        c = make_client()
+        assert c.verify_sources("jwt", []) is True
