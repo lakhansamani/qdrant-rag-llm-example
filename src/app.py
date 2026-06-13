@@ -6,11 +6,16 @@ Gradio web UI for the Local RAG Knowledge Base.
 Starts a local web server (default: http://localhost:7860) with:
   - A chat interface for asking questions
   - A sidebar showing retrieved document sources
-  - An ingestion panel to add new documents at runtime
+
+With --authorizer, the app is permission-aware: a LOGIN SCREEN is shown first
+and the chat stays hidden until the user authenticates. Each question then runs
+with the logged-in user's token, so retrieval is restricted to the documents
+that user can_view (see src/authz.py).
 
 Run with:
     python src/app.py
     python src/app.py --model mistral --storage ./qdrant_data
+    python src/app.py --authorizer http://localhost:8080   # permission-aware
 """
 
 import argparse
@@ -49,279 +54,276 @@ def build_app(
     """
     Build and return the Gradio application.
 
-    The app has three sections:
-      1. Chat — ask questions, see answers and sources
-      2. Status — see how many documents are indexed
-      3. About — brief explanation of what the system does
-
-    When `authz` is provided (--authorizer), login is enforced via
-    Authorizer's hosted login page (authorizer-js `authorize()` redirects
-    there automatically when no session exists) and every question runs
-    with the logged-in user's token: retrieval is restricted to the
-    documents that user can_view (see src/authz.py). A manual
-    email/password fallback is available for offline use.
+    Without --authorizer the chat is shown immediately (single-user mode).
+    With --authorizer the app gates the chat behind a login screen:
+      - the login screen is shown first; the chat column is hidden;
+      - the user logs in via Authorizer's hosted page (a redirect) OR with
+        email/password against the Authorizer API;
+      - on success the login screen is hidden and the chat is revealed;
+      - every question runs with that user's token (permission-filtered).
     """
+    fga = authz is not None
+    base_url = authz.base_url if fga else ""
     dashboard_url = _qdrant_dashboard_url(storage)
 
     with gr.Blocks(title="🔍 Local RAG Knowledge Base") as demo:
 
         # ── Header ────────────────────────────────────────────────────────
-        header = """
-        # 🔍 Local RAG Knowledge Base
-        **Ask questions about your company's internal documents.**
-        Everything runs locally — your data never leaves your machine.
-
-        > 💡 *Powered by Qdrant (vector search) + FastEmbed (embeddings) + Ollama (LLM)*
-        """
-        if authz:
-            header += (
-                "\n> 🔐 *Fine-grained permissions enabled (Authorizer + OpenFGA):* "
-                "you only get answers from documents you may view.\n"
-            )
+        header = (
+            "# 🔍 Local RAG Knowledge Base\n"
+            "**Ask questions about your company's internal documents.** "
+            "Everything runs locally — your data never leaves your machine.\n\n"
+            "> 💡 *Qdrant (vector search) · FastEmbed (embeddings) · Ollama (LLM)*"
+        )
+        if fga:
+            header += " *· Authorizer + OpenFGA (permissions)*"
         if dashboard_url:
-            header += (
-                f"\n> 🧭 *Inspect the embeddings in the Qdrant dashboard:* "
-                f"[{dashboard_url}]({dashboard_url})\n"
-            )
+            header += f"\n>\n> 🧭 *Qdrant dashboard:* [{dashboard_url}]({dashboard_url})"
         gr.Markdown(header)
 
-        # ── Login (FGA mode only) ─────────────────────────────────────────
-        # Primary flow: Authorizer's hosted login page via authorizer-js.
-        # On page load, authorize() silently fetches a token for an existing
-        # session, or REDIRECTS the browser to the hosted login page when
-        # there is none — no credential fields to build or secure here.
         token_state = gr.State("")
-        if authz:
-            gr.Markdown(
-                "### 🔐 Step 1 — Log in to continue\n"
-                "This knowledge base is **permission-aware**: you only get answers "
-                "from documents you're allowed to view. Log in first, then ask a "
-                "question below.\n\n"
-                "> **Demo accounts** (password `Demo@Pass123`):\n"
-                "> - `alice@example.com` — engineering → **onboarding guide** + **tech stack**\n"
-                "> - `carol@example.com` — finance → **onboarding guide** + **financial report**\n"
-                "> - `bob@example.com` — new hire → **onboarding guide** only\n"
-                ">\n"
-                "> Try asking Alice (an engineer) about the **Q4 financials** — she's "
-                "blocked: the finance report is never retrieved, so the assistant can't "
-                "leak it. Ask Carol the same question and she gets the answer."
-            )
-            with gr.Row():
+
+        # ── LOGIN SCREEN (FGA mode only; shown first, chat hidden) ─────────
+        login_view = None
+        login_status = None
+        if fga:
+            with gr.Column(visible=True) as login_view:
+                gr.Markdown(
+                    "## 🔐 Log in to continue\n"
+                    "This knowledge base is **permission-aware** — you only get answers "
+                    "from documents you're allowed to view. Log in, then the chat appears.\n\n"
+                    "> **Demo accounts** (password `Demo@Pass123`):\n"
+                    "> - `alice@example.com` — engineering → onboarding guide + tech stack\n"
+                    "> - `carol@example.com` — finance → onboarding guide + financial report\n"
+                    "> - `bob@example.com` — new hire → onboarding guide only\n"
+                    ">\n"
+                    "> Then ask *“What was our Q4 revenue?”* — Alice (engineering) is blocked "
+                    "from the finance report; Carol (finance) gets the answer."
+                )
                 login_status = gr.Textbox(
-                    label="Session", value="Checking session…",
-                    interactive=False, scale=4,
+                    label="Status", value="Checking your session…",
+                    interactive=False,
                 )
-                logout_btn = gr.Button("Log out 🔒", scale=1)
+                hosted_btn = gr.Button(
+                    "🔐 Log in with Authorizer (hosted login page)", variant="primary"
+                )
+                with gr.Accordion("…or log in with email & password", open=True):
+                    email_box = gr.Textbox(label="Email", placeholder="alice@example.com")
+                    password_box = gr.Textbox(label="Password", type="password")
+                    login_btn = gr.Button("Log in", variant="secondary")
 
-            login_js = f"""
-            async () => {{
-              try {{
-                const ref = new authorizerdev.Authorizer({{
-                  authorizerURL: '{authz.base_url}',
-                  redirectURL: window.location.origin + window.location.pathname,
-                  clientID: '{client_id}',
-                }});
-                // Redirects to the hosted login page when no session exists.
-                const res = await ref.authorize({{
-                  response_type: 'code',
-                  use_refresh_token: false,
-                }});
-                const payload = (res && res.data) || res || {{}};
-                const token = payload.access_token;
-                if (token) {{
-                  const prof = await ref.getProfile({{
-                    Authorization: 'Bearer ' + token,
-                  }});
-                  const email = ((prof && prof.data) || prof || {{}}).email || 'user';
-                  return [token, 'Logged in as ' + email];
-                }}
-              }} catch (e) {{
-                console.error('authorizer login failed', e);
-              }}
-              return ['', 'Not logged in — use the manual login below if offline'];
-            }}
-            """
-            demo.load(None, inputs=None, outputs=[token_state, login_status], js=login_js)
+        # ── CHAT SCREEN (visible immediately without auth; gated with auth) ─
+        with gr.Column(visible=not fga) as chat_view:
 
-            logout_js = f"""
-            async () => {{
-              try {{
-                const ref = new authorizerdev.Authorizer({{
-                  authorizerURL: '{authz.base_url}',
-                  redirectURL: window.location.origin + window.location.pathname,
-                  clientID: '{client_id}',
-                }});
-                await ref.logout();
-              }} catch (e) {{}}
-              window.location.reload();
-            }}
-            """
-            logout_btn.click(None, inputs=None, outputs=None, js=logout_js)
-
-            # Offline fallback: direct email/password login against /graphql
-            # (no CDN, no redirect — useful for air-gapped demos).
-            with gr.Accordion("Manual login (offline fallback)", open=False):
+            if fga:
                 with gr.Row():
-                    email_box = gr.Textbox(
-                        label="Email", placeholder="bob@example.com", scale=2
-                    )
-                    password_box = gr.Textbox(
-                        label="Password", type="password", scale=2
-                    )
-                    login_btn = gr.Button("Log in 🔓", scale=1)
+                    session_banner = gr.Markdown("✅ Logged in.")
+                    logout_btn = gr.Button("Log out 🔒", scale=0)
 
-                def do_login(email: str, password: str):
-                    try:
-                        token = authz.login(email.strip(), password)
-                        allowed = authz.allowed_documents(token)
-                        docs = ", ".join(sorted(allowed)) if allowed else "no documents"
-                        return token, f"Logged in as {email.strip()} — may view: {docs}"
-                    except AuthorizationError as e:
-                        return "", f"Login failed: {e}"
+            # ── Status bar ─────────────────────────────────────────────────
+            with gr.Row():
+                doc_count = gr.Textbox(
+                    label="📚 Knowledge Base Status",
+                    value=f"{pipeline.document_count} chunks indexed | Model: {pipeline.llm.model}",
+                    interactive=False,
+                    scale=3,
+                )
+                refresh_btn = gr.Button("🔄 Refresh", scale=1)
 
-                login_btn.click(
-                    fn=do_login,
-                    inputs=[email_box, password_box],
-                    outputs=[token_state, login_status],
+            if fga:
+                gr.Markdown(
+                    "### 💬 Ask a question\n"
+                    "Ask *“What was our Q4 revenue?”*. As **Alice** (engineering) the finance "
+                    "report is never retrieved, so the assistant says it has no information. "
+                    "Log out and back in as **Carol** (finance) to get the numbers."
                 )
 
-        # ── Status bar ───────────────────────────────────────────────────
-        with gr.Row():
-            doc_count = gr.Textbox(
-                label="📚 Knowledge Base Status",
-                value=f"{pipeline.document_count} chunks indexed | Model: {pipeline.llm.model}",
-                interactive=False,
-                scale=3,
-            )
-            refresh_btn = gr.Button("🔄 Refresh", scale=1)
+            # ── Main chat area ─────────────────────────────────────────────
+            with gr.Row():
+                with gr.Column(scale=3):
+                    chatbot = gr.Chatbot(label="Chat", height=450)
+                    with gr.Row():
+                        question_box = gr.Textbox(
+                            placeholder="Ask anything about the knowledge base...",
+                            label="Your question",
+                            lines=2,
+                            scale=4,
+                        )
+                        submit_btn = gr.Button("Ask ➤", variant="primary", scale=1)
 
-        # ── Main chat area ────────────────────────────────────────────────
-        if authz:
-            gr.Markdown(
-                "### 💬 Step 2 — Ask a question\n"
-                "Try the **same question as different users** and compare the answers. "
-                "Asking *“What was our Q4 revenue?”* as **Alice** (engineering) shows the "
-                "block — the financial report is never retrieved, so the assistant "
-                "truthfully says it has no information. Ask **Carol** (finance) the same "
-                "question and she gets the numbers. The model can't leak what it never saw."
-            )
-        with gr.Row():
-            # Left: Chat
-            with gr.Column(scale=3):
-                chatbot = gr.Chatbot(label="Chat", height=450)
-                with gr.Row():
-                    question_box = gr.Textbox(
-                        placeholder="Ask anything about the knowledge base...",
-                        label="Your question",
-                        lines=2,
-                        scale=4,
+                    gr.Examples(
+                        examples=[
+                            ["What was our Q4 revenue and cash runway?"],
+                            ["What tech stack do we use for the frontend?"],
+                            ["How do I report a security incident?"],
+                            ["What is the annual leave entitlement?"],
+                            ["How do I get access to GitHub?"],
+                            ["What is our data residency policy?"],
+                        ],
+                        inputs=question_box,
+                        label="Example questions",
                     )
-                    submit_btn = gr.Button("Ask ➤", variant="primary", scale=1)
 
-                # Example questions to help users get started
-                gr.Examples(
-                    examples=[
-                        ["What was our Q4 revenue and cash runway?"],
-                        ["What tech stack do we use for the frontend?"],
-                        ["How do I report a security incident?"],
-                        ["What is the annual leave entitlement?"],
-                        ["How do I get access to GitHub?"],
-                        ["What is our data residency policy?"],
-                    ],
-                    inputs=question_box,
-                    label="Example questions (try the Q4 revenue one as Alice vs Carol)",
+                with gr.Column(scale=2):
+                    sources_panel = gr.Markdown(
+                        value="*Ask a question to see which documents were used.*",
+                        label="📎 Retrieved Sources",
+                    )
+
+            with gr.Accordion("ℹ️ How this works", open=False):
+                gr.Markdown(
+                    "**Retrieval-Augmented Generation (RAG)**: your question is embedded "
+                    "with FastEmbed, the most similar chunks are found in Qdrant, and a "
+                    "local Ollama model answers from them. "
+                    + (
+                        "With permissions on, the search is restricted to documents you "
+                        "may view — Authorizer's embedded OpenFGA returns your allow-list, "
+                        "and it becomes a Qdrant payload filter, so off-limits documents "
+                        "are never even retrieved."
+                        if fga else
+                        "No data leaves your machine."
+                    )
                 )
 
-            # Right: Source panel
-            with gr.Column(scale=2):
-                sources_panel = gr.Markdown(
-                    value="*Ask a question to see which documents were used.*",
-                    label="📎 Retrieved Sources",
-                )
-
-        # ── Event handlers ────────────────────────────────────────────────
-
+        # ── Question handler ──────────────────────────────────────────────
         def ask_question(question: str, history: list | None, token: str):
-            """Handle a user question: run RAG pipeline, update chat + sources."""
+            """Run the RAG pipeline for one question; update chat + sources."""
             messages = list(history or [])
             if not question.strip():
                 return messages, "*Please enter a question.*", ""
-            if authz and not token:
-                return messages, "*🔐 Please log in first (top of the page).*", question
+            if fga and not token:
+                return messages, "*🔐 Please log in first.*", question
 
-            # Run the full RAG pipeline
             try:
                 response = pipeline.ask(question, user_token=token or None)
             except (RuntimeError, ConnectionError, AuthorizationError) as e:
-                error_msg = f"❌ {e}"
-                messages.extend(
-                    [
-                        {"role": "user", "content": question},
-                        {"role": "assistant", "content": error_msg},
-                    ]
-                )
+                messages.extend([
+                    {"role": "user", "content": question},
+                    {"role": "assistant", "content": f"❌ {e}"},
+                ])
                 return messages, f"*Error: {e}*", ""
 
-            # Format the sources panel
             sources_md = "### 📎 Sources Used\n\n"
             if response.sources:
                 for i, chunk in enumerate(response.sources, 1):
+                    snippet = chunk.text[:200] + ("..." if len(chunk.text) > 200 else "")
                     sources_md += (
                         f"**{i}. {chunk.source}** *(similarity: {chunk.score:.2%})*\n\n"
-                        f"> {chunk.text[:200]}{'...' if len(chunk.text) > 200 else ''}\n\n"
-                        f"---\n\n"
+                        f"> {snippet}\n\n---\n\n"
                     )
             else:
-                sources_md += "*No relevant documents found for this query.*"
+                sources_md += "*No documents you can access were relevant to this query.*"
 
-            messages.extend(
-                [
-                    {"role": "user", "content": question},
-                    {"role": "assistant", "content": response.answer},
-                ]
-            )
+            messages.extend([
+                {"role": "user", "content": question},
+                {"role": "assistant", "content": response.answer},
+            ])
             return messages, sources_md, ""
 
         def refresh_status():
             return f"{pipeline.document_count} chunks indexed | Model: {pipeline.llm.model}"
 
-        # Wire up events
         submit_btn.click(
-            fn=ask_question,
-            inputs=[question_box, chatbot, token_state],
-            outputs=[chatbot, sources_panel, question_box],
+            ask_question, [question_box, chatbot, token_state],
+            [chatbot, sources_panel, question_box],
         )
         question_box.submit(
-            fn=ask_question,
-            inputs=[question_box, chatbot, token_state],
-            outputs=[chatbot, sources_panel, question_box],
+            ask_question, [question_box, chatbot, token_state],
+            [chatbot, sources_panel, question_box],
         )
-        refresh_btn.click(fn=refresh_status, outputs=doc_count)
+        refresh_btn.click(refresh_status, outputs=doc_count)
 
-        # ── About section ─────────────────────────────────────────────────
-        with gr.Accordion("ℹ️ How this works", open=False):
-            gr.Markdown("""
-            ### RAG Architecture
+        # ── Auth wiring (FGA mode only) ───────────────────────────────────
+        if fga:
+            def reveal(token: str):
+                """Show the chat and hide the login screen once a token exists."""
+                logged_in = bool(token)
+                return (
+                    gr.update(visible=not logged_in),   # login_view
+                    gr.update(visible=logged_in),        # chat_view
+                )
 
-            This demo implements **Retrieval-Augmented Generation (RAG)**:
+            # On page load: silently check for an existing session, or exchange
+            # the ?code returned from the hosted login page. No auto-redirect —
+            # the login screen (with the demo-account hints) is shown first.
+            load_js = (
+                "async () => {"
+                "  if (typeof authorizerdev === 'undefined')"
+                "    return ['', '⚠️ Could not load the Authorizer script (offline?). "
+                "Use email & password below.'];"
+                "  try {"
+                f"    const ref = new authorizerdev.Authorizer({{ authorizerURL: '{base_url}',"
+                "       redirectURL: window.location.origin + window.location.pathname,"
+                f"      clientID: '{client_id}' }});"
+                "    let token = '';"
+                "    if (window.location.search.indexOf('code=') !== -1) {"
+                "      const r = await ref.authorize({ response_type: 'code', use_refresh_token: false });"
+                "      token = ((r && r.data) || r || {}).access_token || '';"
+                "      history.replaceState({}, '', window.location.pathname);"
+                "    } else {"
+                "      const s = await ref.getSession();"
+                "      token = ((s && s.data) || s || {}).access_token || '';"
+                "    }"
+                "    if (token) {"
+                "      const p = await ref.getProfile({ Authorization: 'Bearer ' + token });"
+                "      const email = ((p && p.data) || p || {}).email || 'user';"
+                "      return [token, 'Logged in as ' + email];"
+                "    }"
+                "  } catch (e) { console.error('authorizer session check failed', e); }"
+                "  return ['', 'Please log in to continue.'];"
+                "}"
+            )
+            demo.load(
+                None, None, [token_state, login_status], js=load_js,
+            ).then(reveal, token_state, [login_view, chat_view])
 
-            1. **Ingestion** (done at startup):
-               - Documents are split into overlapping text chunks (~400 chars)
-               - Each chunk is embedded using **FastEmbed** (BAAI/bge-small-en-v1.5)
-               - Vectors are stored in **Qdrant** (local, in-memory)
+            # Hosted login: redirect the browser to Authorizer's login page.
+            # Runs on a user click (a real gesture), so the redirect is reliable.
+            hosted_js = (
+                "async () => {"
+                "  if (typeof authorizerdev === 'undefined') {"
+                "    console.error('Authorizer script not loaded'); return; }"
+                f"  const ref = new authorizerdev.Authorizer({{ authorizerURL: '{base_url}',"
+                "     redirectURL: window.location.origin + window.location.pathname,"
+                f"    clientID: '{client_id}' }});"
+                "  await ref.authorize({ response_type: 'code', use_refresh_token: false });"
+                "}"
+            )
+            hosted_btn.click(None, None, None, js=hosted_js)
 
-            2. **Retrieval** (on each question):
-               - Your question is embedded using the same model
-               - Qdrant finds the top-4 most similar document chunks (cosine similarity)
-               - Chunks with similarity < 0.3 are filtered out
+            # Email/password login against the Authorizer API (always works,
+            # no redirect — the reliable path and the offline fallback).
+            def do_login(email: str, password: str):
+                try:
+                    token = authz.login(email.strip(), password)
+                    allowed = authz.allowed_documents(token)
+                    docs = ", ".join(sorted(allowed)) if allowed else "no documents"
+                    return token, f"Logged in as {email.strip()} — may view: {docs}"
+                except AuthorizationError as e:
+                    return "", f"Login failed: {e}"
 
-            3. **Generation** (on each question):
-               - Retrieved chunks are formatted as context
-               - The full prompt (context + question) is sent to **Ollama** (local LLM)
-               - The LLM generates an answer grounded only in the provided context
+            login_btn.click(
+                do_login, [email_box, password_box], [token_state, login_status],
+            ).then(reveal, token_state, [login_view, chat_view])
 
-            **Privacy**: No data leaves your machine. Qdrant, FastEmbed, and Ollama all run locally.
-            """)
+            def greet(token: str):
+                return "✅ Logged in." if token else ""
+
+            token_state.change(greet, token_state, session_banner)
+
+            # Log out: clear the Authorizer session and return to the login screen.
+            logout_js = (
+                "async () => {"
+                "  try {"
+                f"    const ref = new authorizerdev.Authorizer({{ authorizerURL: '{base_url}',"
+                "       redirectURL: window.location.origin + window.location.pathname,"
+                f"      clientID: '{client_id}' }});"
+                "    await ref.logout();"
+                "  } catch (e) {}"
+                "  window.location.href = window.location.pathname;"
+                "}"
+            )
+            logout_btn.click(None, None, None, js=logout_js)
 
     return demo
 
