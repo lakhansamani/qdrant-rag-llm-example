@@ -92,6 +92,20 @@ def build_app(
         # there is none — no credential fields to build or secure here.
         token_state = gr.State("")
         if authz:
+            gr.Markdown(
+                "### 🔐 Step 1 — Log in to continue\n"
+                "This knowledge base is **permission-aware**: you only get answers "
+                "from documents you're allowed to view. Log in first, then ask a "
+                "question below.\n\n"
+                "> **Demo accounts** (password `Demo@Pass123`):\n"
+                "> - `alice@example.com` — engineering → **onboarding guide** + **tech stack**\n"
+                "> - `carol@example.com` — finance → **onboarding guide** + **financial report**\n"
+                "> - `bob@example.com` — new hire → **onboarding guide** only\n"
+                ">\n"
+                "> Try asking Alice (an engineer) about the **Q4 financials** — she's "
+                "blocked: the finance report is never retrieved, so the assistant can't "
+                "leak it. Ask Carol the same question and she gets the answer."
+            )
             with gr.Row():
                 login_status = gr.Textbox(
                     label="Session", value="Checking session…",
@@ -182,6 +196,15 @@ def build_app(
             refresh_btn = gr.Button("🔄 Refresh", scale=1)
 
         # ── Main chat area ────────────────────────────────────────────────
+        if authz:
+            gr.Markdown(
+                "### 💬 Step 2 — Ask a question\n"
+                "Try the **same question as different users** and compare the answers. "
+                "Asking *“What was our Q4 revenue?”* as **Alice** (engineering) shows the "
+                "block — the financial report is never retrieved, so the assistant "
+                "truthfully says it has no information. Ask **Carol** (finance) the same "
+                "question and she gets the numbers. The model can't leak what it never saw."
+            )
         with gr.Row():
             # Left: Chat
             with gr.Column(scale=3):
@@ -198,15 +221,15 @@ def build_app(
                 # Example questions to help users get started
                 gr.Examples(
                     examples=[
-                        ["How do I report a security incident?"],
-                        ["What is our data residency policy?"],
-                        ["What is the annual leave entitlement?"],
+                        ["What was our Q4 revenue and cash runway?"],
                         ["What tech stack do we use for the frontend?"],
-                        ["Are we allowed to send customer data to AI APIs?"],
+                        ["How do I report a security incident?"],
+                        ["What is the annual leave entitlement?"],
                         ["How do I get access to GitHub?"],
+                        ["What is our data residency policy?"],
                     ],
                     inputs=question_box,
-                    label="Example questions",
+                    label="Example questions (try the Q4 revenue one as Alice vs Carol)",
                 )
 
             # Right: Source panel

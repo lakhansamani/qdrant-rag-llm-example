@@ -1,0 +1,41 @@
+ACME CORP — CONFIDENTIAL — FINANCE & BOARD ONLY
+================================================
+ACME Corp Q4 2025 Financial Summary | Distribution: Finance team and Board only
+
+This is a FICTIONAL document for a demo. ACME Corp is a made-up company. It is
+restricted: it must not be shared with engineering, sales, support, or any team
+outside Finance without CFO approval.
+
+1. REVENUE
+----------
+- ACME Corp Q4 2025 total revenue: $14.2M (up 31% quarter over quarter).
+- Annual recurring revenue (ARR) exiting Q4: $52.6M.
+- Net revenue retention: 118%.
+- Top 3 enterprise accounts contributed 22% of Q4 revenue.
+
+2. MARGINS & BURN
+-----------------
+- Gross margin: 79%.
+- Q4 operating expenses: $9.8M.
+- Monthly cash burn: $1.1M; runway: 26 months at current burn.
+- Cash and equivalents at period end: $34.4M.
+
+3. HEADCOUNT & COMPENSATION
+---------------------------
+- Total headcount: 142 (up from 121 in Q3).
+- Engineering compensation band (senior): $165K–$210K base.
+- Executive compensation pool (cash + equity refresh): reviewed by the
+  Compensation Committee; details in Appendix C.
+- Planned 2026 merit increase budget: 4.5% of payroll.
+
+4. FUNDRAISING
+--------------
+- Series B term sheet under negotiation at a $280M pre-money valuation.
+- Expected close: Q2 2026. Lead investor under NDA.
+
+5. KEY RISKS
+------------
+- Concentration risk: largest customer is 9% of ARR.
+- FX exposure on EUR-denominated contracts (~12% of revenue).
+
+Questions about this report go to the ACME Corp CFO. Do not forward.

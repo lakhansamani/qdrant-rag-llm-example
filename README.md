@@ -213,13 +213,18 @@ python scripts/fga_demo.py --llm  # same, with generated answers via Ollama
 python src/app.py --authorizer http://localhost:8080   # web UI with login
 ```
 
-The seed creates two users (password `Demo@Pass123`) with this access matrix:
+The seed creates three users (password `Demo@Pass123`) with this access matrix:
 
-| document | `alice@example.com` | `bob@example.com` | why |
-|----------|------|------|-----|
-| `onboarding_guide.txt` | ✅ | ✅ | public (`user:*` viewer) |
-| `tech_stack.txt` | ✅ | ❌ | `team:engineering#member` viewer (alice is a member) |
-| `security_policy.txt` | ❌ | ❌ | `team:security#member` viewer (nobody is) |
+| document | `alice` (eng) | `bob` (new hire) | `carol` (finance) | why |
+|----------|:----:|:----:|:----:|-----|
+| `onboarding_guide.txt` | ✅ | ✅ | ✅ | public (`user:*` viewer) |
+| `tech_stack.txt` | ✅ | ❌ | ❌ | `team:engineering#member` viewer |
+| `financial_report.txt` | ❌ | ❌ | ✅ | `team:finance#member` viewer |
+| `security_policy.txt` | ❌ | ❌ | ❌ | `team:security#member` viewer (nobody is) |
+
+The headline example: **an engineer is blocked from the financial report.** Ask Alice
+*"What was our Q4 revenue?"* and she gets nothing — the document is never retrieved, so
+the LLM can't leak it. Ask Carol (finance) the same question and she gets the numbers.
 
 `fga_demo.py` also demonstrates **live revocation**: Bob is granted engineering
 membership (one tuple write) and immediately retrieves the tech-stack doc; the tuple

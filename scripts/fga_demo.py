@@ -32,7 +32,7 @@ from src.pipeline import RAGPipeline
 
 QUESTIONS = [
     "What tech stack do we use for the frontend?",
-    "How do I report a security incident?",
+    "What was our Q4 revenue and cash runway?",
 ]
 
 
@@ -99,10 +99,13 @@ def main() -> None:
     print("⏳ Logging in demo users (created by scripts/fga_seed.py)...")
     tokens = {
         email: authz.login(email, DEMO_PASSWORD)
-        for email in ("bob@example.com", "alice@example.com")
+        for email in ("bob@example.com", "alice@example.com", "carol@example.com")
     }
 
     # ── Act 1: same questions, different answers ──────────────────────────
+    # Note the finance question: only carol (finance) gets an answer; alice
+    # (engineering) and bob are blocked — the financial report is never
+    # retrieved for them, so the LLM cannot leak it.
     print("\n" + "─" * 60)
     print("ACT 1 — Same questions, permission-filtered retrieval")
     print("─" * 60)

@@ -4,20 +4,26 @@ scripts/fga_seed.py
 One-shot, idempotent setup for the permission-aware (FGA) demo.
 
 Against a running Authorizer server (see docker-compose.yml) this script:
-  1. Creates two demo users (skipped if they already exist):
+  1. Creates the demo users (skipped if they already exist):
        alice@example.com — engineering team member
        bob@example.com   — new hire, no team
+       carol@example.com — finance team member
   2. Installs the authorization model (skipped if it is already active).
   3. Writes the relationship tuples that grant document access
      (only the missing ones — safe to re-run).
 
 The resulting access matrix over data/knowledge_base/:
 
-    document                 alice   bob    why
-    ---------------------    -----   ----   ------------------------------
-    onboarding_guide.txt     yes     yes    public (user:* viewer)
-    tech_stack.txt           yes     no     team:engineering#member viewer
-    security_policy.txt      no      no     team:security#member viewer
+    document                 alice   bob    carol   why
+    ---------------------    -----   ----   -----   ----------------------------
+    onboarding_guide.txt     yes     yes    yes     public (user:* viewer)
+    tech_stack.txt           yes     no     no      team:engineering#member viewer
+    financial_report.txt     no      no     yes     team:finance#member viewer
+    security_policy.txt      no      no     no      team:security#member viewer
+
+So an engineer (alice) is BLOCKED from the financial report; only finance
+(carol) can read it. Asking alice about Q4 revenue returns nothing — the
+document is never retrieved, so the LLM can't leak it.
 
 Usage:
     python scripts/fga_seed.py
@@ -39,7 +45,7 @@ from src.authz import AuthorizationError, AuthzClient
 
 DEMO_PASSWORD = "Demo@Pass123"  # demo-only; satisfies the strong-password policy
 
-DEMO_USERS = ["alice@example.com", "bob@example.com"]
+DEMO_USERS = ["alice@example.com", "bob@example.com", "carol@example.com"]
 
 # The authorization model. Documents are FGA objects named after the chunk
 # payload's `source` field (the filename) — see src/authz.py.
@@ -60,11 +66,13 @@ type document
     define can_view: (viewer or owner) but not blocked
 """
 
-# (user, relation, object) grants. {alice} is replaced with alice's user id.
+# (user, relation, object) grants. {alice}/{carol} are replaced with user ids.
 TUPLES = [
     ("user:*", "viewer", "document:onboarding_guide.txt"),
     ("user:{alice}", "member", "team:engineering"),
+    ("user:{carol}", "member", "team:finance"),
     ("team:engineering#member", "viewer", "document:tech_stack.txt"),
+    ("team:finance#member", "viewer", "document:financial_report.txt"),
     ("team:security#member", "viewer", "document:security_policy.txt"),
 ]
 
@@ -164,7 +172,7 @@ def ensure_model(admin: AdminClient) -> None:
     print(f"  ✓ Installed authorization model {data['_fga_write_model']['id']}")
 
 
-def ensure_tuples(admin: AdminClient, alice_id: str) -> None:
+def ensure_tuples(admin: AdminClient, alice_id: str, carol_id: str) -> None:
     """Write the demo grants that don't exist yet (idempotent)."""
     existing: set[tuple[str, str, str]] = set()
     data = admin.graphql(
@@ -177,7 +185,7 @@ def ensure_tuples(admin: AdminClient, alice_id: str) -> None:
         existing.add((t["user"], t["relation"], t["object"]))
 
     wanted = [
-        (user.format(alice=alice_id), relation, obj)
+        (user.format(alice=alice_id, carol=carol_id), relation, obj)
         for user, relation, obj in TUPLES
     ]
     missing = [t for t in wanted if t not in existing]
@@ -219,7 +227,11 @@ def main() -> None:
     ensure_model(admin)
 
     print("\n⏳ Ensuring relationship tuples...")
-    ensure_tuples(admin, alice_id=user_ids["alice@example.com"])
+    ensure_tuples(
+        admin,
+        alice_id=user_ids["alice@example.com"],
+        carol_id=user_ids["carol@example.com"],
+    )
 
     print(f"\n{'=' * 60}")
     print("✅ Seed complete. Demo credentials:")
