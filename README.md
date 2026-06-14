@@ -183,6 +183,29 @@ print(response.answer)
 print(response.sources[0].source, response.sources[0].score)
 ```
 
+**Permission-aware mode is enforced in the Python API too, not just the UI.** When
+the pipeline is built with an `AuthzClient`, `ask()` **requires** a valid Authorizer
+token and is **fail-closed** — a missing, empty, or forged token raises
+`AuthorizationError` and the LLM is never called:
+
+```python
+from src.authz import AuthzClient
+
+authz = AuthzClient("http://localhost:8080")
+pipeline = RAGPipeline(llm_model="llama3.2", authz=authz)
+pipeline.ingest_directory(Path("data/knowledge_base"))
+
+token = authz.login("alice@example.com", "Demo@Pass123")     # engineering
+pipeline.ask("What was our Q4 revenue?", user_token=token)   # finance never retrieved
+
+pipeline.ask("What was our Q4 revenue?")                     # raises AuthorizationError
+pipeline.ask("…", user_token="forged.jwt")                   # raises AuthorizationError
+```
+
+Because enforcement lives in `pipeline.ask()` (server-side), the Gradio "Use via API"
+endpoints can't bypass it either — the token comes from server-side session state an
+API caller can't set, and the pipeline re-validates it regardless.
+
 ### Add your own documents
 
 1. Add `.txt` files under `data/knowledge_base/` (or pass `--data`).

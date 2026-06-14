@@ -191,14 +191,17 @@ class TestRAGPipeline:
 class MockAuthz:
     """Scriptable stand-in for AuthzClient."""
 
-    def __init__(self, allowed: list[str], verify: bool = True):
+    def __init__(self, allowed: list[str], verify: bool = True, raises: Exception | None = None):
         self._allowed = allowed
         self._verify = verify
+        self._raises = raises
         self.allowed_calls: list[str] = []
         self.verify_calls: list[list[str]] = []
 
     def allowed_documents(self, user_token: str) -> list[str]:
         self.allowed_calls.append(user_token)
+        if self._raises is not None:
+            raise self._raises
         return list(self._allowed)
 
     def verify_sources(self, user_token: str, sources: list[str]) -> bool:
@@ -221,6 +224,19 @@ class TestFGAPipeline:
         fga_pipeline.authz = MockAuthz(allowed=["onboarding_guide.txt"])
         with pytest.raises(AuthorizationError, match="requires the user's access token"):
             fga_pipeline.ask("What is the security policy?")
+
+    def test_forged_token_is_refused_at_pipeline(self, fga_pipeline):
+        """A bad/forged token is rejected server-side — the LLM is never called.
+
+        This is the property that protects ANY caller (UI or raw Gradio API):
+        enforcement lives in pipeline.ask(), not in the UI handler.
+        """
+        fga_pipeline.authz = MockAuthz(
+            allowed=[], raises=AuthorizationError("unauthorized")
+        )
+        fga_pipeline.llm.generate = MagicMock(side_effect=AssertionError("LLM called"))
+        with pytest.raises(AuthorizationError, match="unauthorized"):
+            fga_pipeline.ask("What was our Q4 revenue?", user_token="forged.jwt")
 
     def test_sources_restricted_to_allowed_documents(self, fga_pipeline):
         """A user who can only view onboarding never gets security chunks."""

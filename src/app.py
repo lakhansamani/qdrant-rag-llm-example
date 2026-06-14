@@ -7,10 +7,11 @@ Starts a local web server (default: http://localhost:7860) with:
   - A chat interface for asking questions
   - A sidebar showing retrieved document sources
 
-With --authorizer, the app is permission-aware: a LOGIN SCREEN is shown first
-and the chat stays hidden until the user authenticates. Each question then runs
-with the logged-in user's token, so retrieval is restricted to the documents
-that user can_view (see src/authz.py).
+With --authorizer, the app is permission-aware: a LOGIN SCREEN (email/password,
+verified against the Authorizer API) is shown first and the chat stays hidden
+until the user authenticates. Each question then runs with the logged-in user's
+token, so retrieval is restricted to the documents that user can_view (see
+src/authz.py).
 
 Run with:
     python src/app.py
@@ -49,7 +50,6 @@ def build_app(
     pipeline: RAGPipeline,
     storage: str = DEFAULT_STORAGE,
     authz: AuthzClient | None = None,
-    client_id: str = "",
 ) -> gr.Blocks:
     """
     Build and return the Gradio application.
@@ -57,13 +57,12 @@ def build_app(
     Without --authorizer the chat is shown immediately (single-user mode).
     With --authorizer the app gates the chat behind a login screen:
       - the login screen is shown first; the chat column is hidden;
-      - the user logs in via Authorizer's hosted page (a redirect) OR with
-        email/password against the Authorizer API;
+      - the user logs in with email/password (verified server-side against
+        the Authorizer API via the authorizer-py SDK);
       - on success the login screen is hidden and the chat is revealed;
       - every question runs with that user's token (permission-filtered).
     """
     fga = authz is not None
-    base_url = authz.base_url if fga else ""
     dashboard_url = _qdrant_dashboard_url(storage)
 
     with gr.Blocks(title="🔍 Local RAG Knowledge Base") as demo:
@@ -100,17 +99,13 @@ def build_app(
                     "> Then ask *“What was our Q4 revenue?”* — Alice (engineering) is blocked "
                     "from the finance report; Carol (finance) gets the answer."
                 )
+                email_box = gr.Textbox(label="Email", placeholder="alice@example.com")
+                password_box = gr.Textbox(label="Password", type="password")
+                login_btn = gr.Button("Log in", variant="primary")
                 login_status = gr.Textbox(
-                    label="Status", value="Checking your session…",
+                    label="Status", value="Enter your credentials to log in.",
                     interactive=False,
                 )
-                hosted_btn = gr.Button(
-                    "🔐 Log in with Authorizer (hosted login page)", variant="primary"
-                )
-                with gr.Accordion("…or log in with email & password", open=True):
-                    email_box = gr.Textbox(label="Email", placeholder="alice@example.com")
-                    password_box = gr.Textbox(label="Password", type="password")
-                    login_btn = gr.Button("Log in", variant="secondary")
 
         # ── CHAT SCREEN (visible immediately without auth; gated with auth) ─
         with gr.Column(visible=not fga) as chat_view:
@@ -187,7 +182,15 @@ def build_app(
 
         # ── Question handler ──────────────────────────────────────────────
         def ask_question(question: str, history: list | None, token: str):
-            """Run the RAG pipeline for one question; update chat + sources."""
+            """Run the RAG pipeline for one question; update chat + sources.
+
+            Auth is NOT enforced here alone — the UI gate can be bypassed by
+            calling the Gradio API directly. The real enforcement is in
+            pipeline.ask(), which is fail-closed: in FGA mode it requires a
+            valid Authorizer token and raises AuthorizationError otherwise.
+            `token` arrives from a server-side gr.State an API caller cannot
+            set, so it defaults to "" for any unauthenticated call.
+            """
             messages = list(history or [])
             if not question.strip():
                 return messages, "*Please enter a question.*", ""
@@ -195,6 +198,8 @@ def build_app(
                 return messages, "*🔐 Please log in first.*", question
 
             try:
+                # pipeline.ask re-validates the token server-side (fail-closed):
+                # an empty/forged token never returns documents.
                 response = pipeline.ask(question, user_token=token or None)
             except (RuntimeError, ConnectionError, AuthorizationError) as e:
                 messages.extend([
@@ -243,57 +248,12 @@ def build_app(
                     gr.update(visible=logged_in),        # chat_view
                 )
 
-            # On page load: silently check for an existing session, or exchange
-            # the ?code returned from the hosted login page. No auto-redirect —
-            # the login screen (with the demo-account hints) is shown first.
-            load_js = (
-                "async () => {"
-                "  if (typeof authorizerdev === 'undefined')"
-                "    return ['', '⚠️ Could not load the Authorizer script (offline?). "
-                "Use email & password below.'];"
-                "  try {"
-                f"    const ref = new authorizerdev.Authorizer({{ authorizerURL: '{base_url}',"
-                "       redirectURL: window.location.origin + window.location.pathname,"
-                f"      clientID: '{client_id}' }});"
-                "    let token = '';"
-                "    if (window.location.search.indexOf('code=') !== -1) {"
-                "      const r = await ref.authorize({ response_type: 'code', use_refresh_token: false });"
-                "      token = ((r && r.data) || r || {}).access_token || '';"
-                "      history.replaceState({}, '', window.location.pathname);"
-                "    } else {"
-                "      const s = await ref.getSession();"
-                "      token = ((s && s.data) || s || {}).access_token || '';"
-                "    }"
-                "    if (token) {"
-                "      const p = await ref.getProfile({ Authorization: 'Bearer ' + token });"
-                "      const email = ((p && p.data) || p || {}).email || 'user';"
-                "      return [token, 'Logged in as ' + email];"
-                "    }"
-                "  } catch (e) { console.error('authorizer session check failed', e); }"
-                "  return ['', 'Please log in to continue.'];"
-                "}"
-            )
-            demo.load(
-                None, None, [token_state, login_status], js=load_js,
-            ).then(reveal, token_state, [login_view, chat_view])
-
-            # Hosted login: redirect the browser to Authorizer's login page.
-            # Runs on a user click (a real gesture), so the redirect is reliable.
-            hosted_js = (
-                "async () => {"
-                "  if (typeof authorizerdev === 'undefined') {"
-                "    console.error('Authorizer script not loaded'); return; }"
-                f"  const ref = new authorizerdev.Authorizer({{ authorizerURL: '{base_url}',"
-                "     redirectURL: window.location.origin + window.location.pathname,"
-                f"    clientID: '{client_id}' }});"
-                "  await ref.authorize({ response_type: 'code', use_refresh_token: false });"
-                "}"
-            )
-            hosted_btn.click(None, None, None, js=hosted_js)
-
-            # Email/password login against the Authorizer API (always works,
-            # no redirect — the reliable path and the offline fallback).
+            # Email/password login against the Authorizer API (server-side via
+            # the authorizer-py SDK). On success the token is stored and the
+            # chat is revealed; on failure the login screen stays put.
             def do_login(email: str, password: str):
+                if not email.strip() or not password:
+                    return "", "Please enter your email and password."
                 try:
                     token = authz.login(email.strip(), password)
                     allowed = authz.allowed_documents(token)
@@ -305,25 +265,22 @@ def build_app(
             login_btn.click(
                 do_login, [email_box, password_box], [token_state, login_status],
             ).then(reveal, token_state, [login_view, chat_view])
+            password_box.submit(
+                do_login, [email_box, password_box], [token_state, login_status],
+            ).then(reveal, token_state, [login_view, chat_view])
 
             def greet(token: str):
                 return "✅ Logged in." if token else ""
 
             token_state.change(greet, token_state, session_banner)
 
-            # Log out: clear the Authorizer session and return to the login screen.
-            logout_js = (
-                "async () => {"
-                "  try {"
-                f"    const ref = new authorizerdev.Authorizer({{ authorizerURL: '{base_url}',"
-                "       redirectURL: window.location.origin + window.location.pathname,"
-                f"      clientID: '{client_id}' }});"
-                "    await ref.logout();"
-                "  } catch (e) {}"
-                "  window.location.href = window.location.pathname;"
-                "}"
-            )
-            logout_btn.click(None, None, None, js=logout_js)
+            # Log out: clear the token and return to the login screen.
+            def do_logout():
+                return "", "Logged out. Enter your credentials to log in."
+
+            logout_btn.click(
+                do_logout, None, [token_state, login_status],
+            ).then(reveal, token_state, [login_view, chat_view])
 
     return demo
 
@@ -342,12 +299,6 @@ def main():
              "fine-grained permissions: login required, retrieval restricted "
              "to documents the user can_view. Seed first: python scripts/fga_seed.py",
     )
-    parser.add_argument(
-        "--client-id",
-        default="123456",
-        help="Authorizer client id for the hosted login flow "
-             "(value of the server's --client-id flag; see docker-compose.yml)",
-    )
     args = parser.parse_args()
 
     # Build the pipeline and ingest documents
@@ -364,23 +315,15 @@ def main():
     pipeline.ingest_directory(Path(args.data))
 
     # Build and launch the Gradio UI
-    app = build_app(
-        pipeline, storage=args.storage, authz=authz, client_id=args.client_id
-    )
-    # In FGA mode, load authorizer-js from the CDN so the browser can run the
-    # hosted-login flow. Passed to launch() (Gradio 6 moved `head` here).
-    head_html = (
-        '<script src="https://unpkg.com/@authorizerdev/authorizer-js/'
-        'lib/authorizer.min.js"></script>'
-        if authz
-        else None
-    )
+    app = build_app(pipeline, storage=args.storage, authz=authz)
+    # The prediction API surface is safe to expose: enforcement lives in
+    # pipeline.ask() (fail-closed on the user's token), not in the UI, so a
+    # raw API call with no/invalid token returns no documents (see README).
     app.launch(
         server_port=args.port,
         share=args.share,
         show_error=True,
         inbrowser=True,       # Auto-open the browser
-        head=head_html,
         theme=gr.themes.Soft(
             primary_hue="blue",
             secondary_hue="slate",
