@@ -126,24 +126,16 @@ Use the chat box or example prompts, e.g.:
 
 ## Architecture
 
-```
-User Question
-      │
-      ▼
-┌─────────────────────────────┐
-│  FastEmbed (bge-small-en)   │  ← 384-dim vectors, local ONNX
-└─────────────┬───────────────┘
-              ▼
-┌─────────────────────────────┐
-│  Qdrant                     │  ← Top-k chunk search (cosine)
-└─────────────┬───────────────┘
-              ▼
-┌─────────────────────────────┐
-│  Ollama (local LLM)         │  ← Context + question → answer
-└─────────────┬───────────────┘
-              ▼
-         answer + sources
-```
+One Python app process talks to three local servers. In permission-aware mode
+(`--authorizer`), the permission check happens **before** the vector search, so
+documents the user can't access are never even retrieved.
+
+![Architecture and internal workflow: a browser running the Gradio chat talks to a single Python RAG app (authorizer-py client, FastEmbed, retriever/pipeline, Ollama client), which talks to three local servers — Authorizer with embedded OpenFGA + SQLite for login and permissions, Qdrant for vector search with a payload filter, and Ollama for the local LLM. Flow: 1 log in and get a JWT, 2 ask a question with the JWT, 3 fetch the user's allow-list from OpenFGA, 4 embed the question with FastEmbed in-process, 5 search Qdrant only within allowed documents and get permitted chunks, 6 Ollama writes the answer, 7 the answer appears in the chat.](docs/architecture.svg)
+
+> Editable source: [`docs/architecture.excalidraw`](docs/architecture.excalidraw) (open at [excalidraw.com](https://excalidraw.com)).
+>
+> Without `--authorizer`, steps 1–3 are skipped: it's a plain local RAG pipeline
+> (FastEmbed → Qdrant → Ollama) with no login and no permission filtering.
 
 ---
 

@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 630" role="img" aria-label="Architecture and internal workflow. A browser running the Gradio chat talks to a single Python RAG app process containing the authorizer-py client, FastEmbed, the retriever/pipeline, and the Ollama client. The app talks to three local servers: Authorizer (embedded OpenFGA plus SQLite) for login and permissions, Qdrant for vector search with a payload filter, and Ollama for the local LLM. Flow: 1 the user logs in via Authorizer and gets a JWT; 2 asks a question with the JWT; 3 the app asks Authorizer's OpenFGA for the user's allow-list; 4 FastEmbed embeds the question in-process; 5 Qdrant searches only within allowed documents and returns permitted chunks; 6 Ollama writes an answer from those chunks; 7 the answer appears in the chat. Off-limits documents are never retrieved.">
+  <style>
+    .t   { font-family: ui-sans-serif, system-ui, sans-serif; }
+    .bt  { fill: #ffffff; font-weight: 600; }
+    .bs  { fill: #e2e8f0; }
+    .title { fill: #0f172a; font-weight: 700; }
+    .lbl   { fill: #475569; }
+    .req { stroke: #475569; stroke-width: 2; fill: none; }
+    .ret { stroke: #94a3b8; stroke-width: 2; fill: none; stroke-dasharray: 6 5; }
+    .inflow { stroke: #cbd5e1; stroke-width: 2; fill: none; }
+    .num { fill: #ffffff; font-weight: 700; }
+    @media (prefers-color-scheme: dark) {
+      .title { fill: #f1f5f9; } .lbl { fill: #94a3b8; }
+      .req { stroke: #94a3b8; } .inflow { stroke: #475569; }
+    }
+  </style>
+  <defs>
+    <marker id="a" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#475569"/></marker>
+    <marker id="ad" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#94a3b8"/></marker>
+    <marker id="ai" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#cbd5e1"/></marker>
+  </defs>
+
+  <text x="30" y="32" class="t title" font-size="21">Architecture &amp; internal workflow</text>
+  <text x="30" y="55" class="t lbl" font-size="13">One Python app process, three local servers. The permission check happens before the search — so off-limits files are never retrieved.</text>
+
+  <!-- login arrow (drawn first, behind boxes) -->
+  <polyline class="req" points="95,120 95,72 785,72 785,114" marker-end="url(#a)"/>
+  <circle cx="440" cy="72" r="11" fill="#3B82F6"/><text x="440" y="76" class="t num" font-size="12" text-anchor="middle">1</text>
+  <text x="455" y="66" class="t lbl" font-size="11">log in → JWT</text>
+
+  <!-- Browser -->
+  <rect x="20" y="120" width="150" height="64" rx="11" fill="#334155"/>
+  <text x="95" y="148" class="t bt" font-size="14" text-anchor="middle">🌐 Browser</text>
+  <text x="95" y="167" class="t bs" font-size="11" text-anchor="middle">Gradio chat (login first)</text>
+
+  <!-- RAG app container -->
+  <rect x="215" y="92" width="325" height="412" rx="14" fill="none" stroke="#3B82F6" stroke-width="1.5" stroke-dasharray="3 4"/>
+  <text x="232" y="110" class="t title" font-size="12">🐍 Your RAG app — one Python process on your server</text>
+
+  <rect x="235" y="122" width="285" height="52" rx="9" fill="#3B82F6"/>
+  <text x="377" y="143" class="t bt" font-size="12.5" text-anchor="middle">authorizer-py client (authz.py)</text>
+  <text x="377" y="161" class="t bs" font-size="10.5" text-anchor="middle">login · list_permissions · check</text>
+
+  <rect x="235" y="208" width="285" height="52" rx="9" fill="#0d9488"/>
+  <text x="377" y="229" class="t bt" font-size="12.5" text-anchor="middle">FastEmbed — embed the question</text>
+  <text x="377" y="247" class="t bs" font-size="10.5" text-anchor="middle">local ONNX model, in-process</text>
+
+  <rect x="235" y="294" width="285" height="52" rx="9" fill="#475569"/>
+  <text x="377" y="315" class="t bt" font-size="12.5" text-anchor="middle">Retriever / pipeline</text>
+  <text x="377" y="333" class="t bs" font-size="10.5" text-anchor="middle">applies the allow-list as a filter</text>
+
+  <rect x="235" y="380" width="285" height="52" rx="9" fill="#1f2937"/>
+  <text x="377" y="401" class="t bt" font-size="12.5" text-anchor="middle">Ollama client</text>
+  <text x="377" y="419" class="t bs" font-size="10.5" text-anchor="middle">sends context + question</text>
+
+  <!-- internal flow arrows (top to bottom) -->
+  <path class="inflow" d="M377,174 L377,204" marker-end="url(#ai)"/>
+  <path class="inflow" d="M377,260 L377,290" marker-end="url(#ai)"/>
+  <path class="inflow" d="M377,346 L377,376" marker-end="url(#ai)"/>
+
+  <!-- External servers -->
+  <rect x="610" y="116" width="350" height="62" rx="11" fill="#3B82F6"/>
+  <text x="785" y="140" class="t bt" font-size="13" text-anchor="middle">🔐 Authorizer · :8080</text>
+  <text x="785" y="160" class="t bs" font-size="11" text-anchor="middle">embedded OpenFGA (ReBAC) + SQLite store</text>
+
+  <rect x="610" y="290" width="350" height="60" rx="11" fill="#7c2d4d"/>
+  <text x="785" y="314" class="t bt" font-size="13" text-anchor="middle">🧭 Qdrant · :6333</text>
+  <text x="785" y="334" class="t bs" font-size="11" text-anchor="middle">vector search + payload filter (allow-list)</text>
+
+  <rect x="610" y="378" width="350" height="56" rx="11" fill="#1f2937"/>
+  <text x="785" y="400" class="t bt" font-size="13" text-anchor="middle">🦙 Ollama · :11434</text>
+  <text x="785" y="420" class="t bs" font-size="11" text-anchor="middle">llama3.2 — local LLM</text>
+
+  <!-- 2: Browser -> app -->
+  <path class="req" d="M170,148 L231,148" marker-end="url(#a)"/>
+  <circle cx="200" cy="148" r="11" fill="#3B82F6"/><text x="200" y="152" class="t num" font-size="12" text-anchor="middle">2</text>
+
+  <!-- 3: authz -> Authorizer (allow-list back) -->
+  <path class="req" d="M520,142 L606,142" marker-end="url(#a)"/>
+  <circle cx="563" cy="135" r="11" fill="#3B82F6"/><text x="563" y="139" class="t num" font-size="12" text-anchor="middle">3</text>
+  <path class="ret" d="M610,160 L524,160" marker-end="url(#ad)"/>
+  <text x="567" y="174" class="t lbl" font-size="10" text-anchor="middle">allow-list</text>
+
+  <!-- 5: retriever -> Qdrant (chunks back) -->
+  <path class="req" d="M520,314 L606,314" marker-end="url(#a)"/>
+  <circle cx="563" cy="307" r="11" fill="#3B82F6"/><text x="563" y="311" class="t num" font-size="12" text-anchor="middle">5</text>
+  <path class="ret" d="M610,332 L524,332" marker-end="url(#ad)"/>
+  <text x="567" y="346" class="t lbl" font-size="10" text-anchor="middle">permitted chunks</text>
+
+  <!-- 6: ollama client -> Ollama (answer back) -->
+  <path class="req" d="M520,402 L606,402" marker-end="url(#a)"/>
+  <circle cx="563" cy="395" r="11" fill="#3B82F6"/><text x="563" y="399" class="t num" font-size="12" text-anchor="middle">6</text>
+  <path class="ret" d="M610,420 L524,420" marker-end="url(#ad)"/>
+  <text x="567" y="434" class="t lbl" font-size="10" text-anchor="middle">answer</text>
+
+  <!-- 4: embed (in-process marker) -->
+  <circle cx="255" cy="234" r="11" fill="#0d9488" stroke="#ffffff" stroke-width="1.5"/><text x="255" y="238" class="t num" font-size="12" text-anchor="middle">4</text>
+
+  <!-- 7: answer back to browser -->
+  <polyline class="ret" points="215,470 95,470 95,186" marker-end="url(#ad)"/>
+  <circle cx="150" cy="470" r="11" fill="#3B82F6"/><text x="150" y="474" class="t num" font-size="12" text-anchor="middle">7</text>
+  <text x="232" y="474" class="t lbl" font-size="11">answer shown in chat</text>
+
+  <!-- Legend -->
+  <line x1="30" y1="520" x2="950" y2="520" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="30"  y="544" class="t lbl" font-size="12">1 · User logs in via Authorizer's hosted page and gets a JWT.    2 · User asks a question in the chat; the JWT rides along.</text>
+  <text x="30"  y="566" class="t lbl" font-size="12">3 · The app asks Authorizer (OpenFGA) what this user may view → allow-list.    4 · FastEmbed turns the question into a vector (in-process).</text>
+  <text x="30"  y="588" class="t lbl" font-size="12">5 · Qdrant searches only within the allowed documents (payload filter) → permitted chunks.    6 · Ollama writes the answer from those chunks.</text>
+  <text x="30"  y="610" class="t lbl" font-size="12">7 · The answer appears in the chat. Off-limits documents were never embedded, never searched, never seen by the model.</text>
+</svg>
