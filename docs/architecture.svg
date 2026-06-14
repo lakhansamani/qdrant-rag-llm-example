@@ -103,7 +103,7 @@
 
   <!-- Legend -->
   <line x1="30" y1="520" x2="950" y2="520" stroke="#cbd5e1" stroke-width="1"/>
-  <text x="30"  y="544" class="t lbl" font-size="12">1 · User logs in via Authorizer's hosted page and gets a JWT.    2 · User asks a question in the chat; the JWT rides along.</text>
+  <text x="30"  y="544" class="t lbl" font-size="12">1 · User logs in via Authorizer (email/password) and gets a JWT.    2 · User asks a question in the chat; the JWT rides along.</text>
   <text x="30"  y="566" class="t lbl" font-size="12">3 · The app asks Authorizer (OpenFGA) what this user may view → allow-list.    4 · FastEmbed turns the question into a vector (in-process).</text>
   <text x="30"  y="588" class="t lbl" font-size="12">5 · Qdrant searches only within the allowed documents (payload filter) → permitted chunks.    6 · Ollama writes the answer from those chunks.</text>
   <text x="30"  y="610" class="t lbl" font-size="12">7 · The answer appears in the chat. Off-limits documents were never embedded, never searched, never seen by the model.</text>

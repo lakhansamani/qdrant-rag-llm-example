@@ -240,6 +240,12 @@ def build_app(
 
         # ── Auth wiring (FGA mode only) ───────────────────────────────────
         if fga:
+            # In this branch fga is True, so these are all set (declared None
+            # above, assigned inside the matching `if fga` blocks). Assert it
+            # so the type checker narrows them for the closures/wiring below.
+            assert authz is not None
+            assert login_view is not None and login_status is not None
+
             def reveal(token: str):
                 """Show the chat and hide the login screen once a token exists."""
                 logged_in = bool(token)

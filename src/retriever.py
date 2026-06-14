@@ -228,16 +228,20 @@ class Retriever:
             allowed_sources=allowed_sources,
         )
 
-        # Convert Qdrant ScoredPoint objects to our cleaner RetrievedChunk dataclass
-        return [
-            RetrievedChunk(
-                text=r.payload["text"],
-                source=r.payload["source"],
-                chunk_index=r.payload["chunk_index"],
-                score=r.score,
+        # Convert Qdrant ScoredPoint objects to our cleaner RetrievedChunk dataclass.
+        # with_payload=True in the search, so payload is always present here.
+        chunks: list[RetrievedChunk] = []
+        for r in raw_results:
+            payload = r.payload or {}
+            chunks.append(
+                RetrievedChunk(
+                    text=payload["text"],
+                    source=payload["source"],
+                    chunk_index=payload["chunk_index"],
+                    score=r.score,
+                )
             )
-            for r in raw_results
-        ]
+        return chunks
 
     def format_context(self, chunks: list[RetrievedChunk]) -> str:
         """
