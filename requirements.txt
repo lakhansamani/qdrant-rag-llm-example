@@ -4,8 +4,8 @@ gradio>=4.44.0                      # Web UI
 
 # Fine-grained authorization (optional — only needed for the FGA demo:
 # scripts/fga_seed.py, scripts/fga_demo.py, src/app.py --authorizer)
-# Official Authorizer Python SDK. Not yet on PyPI; install from GitHub.
-authorizer-py @ git+https://github.com/authorizerdev/authorizer-py.git  # Authorizer + OpenFGA
+# Official Authorizer Python SDK, from PyPI: https://pypi.org/project/authorizer-py/
+authorizer-py>=0.1.0,<0.2          # Authorizer + OpenFGA
 
 # Testing
 pytest>=8.0.0                       # Test runner
