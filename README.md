@@ -216,7 +216,7 @@ restricted chunks are never scored and never reach the LLM.
 
 > Powered by [Authorizer](https://github.com/authorizerdev/authorizer) (self-hosted
 > auth + embedded [OpenFGA](https://openfga.dev) engine). Requires Authorizer ≥ v2.3.0
-> — `docker-compose.yml` pins `quay.io/authorizer/authorizer:2.3.0-rc.2`.
+> — `docker-compose.yml` pins `quay.io/authorizer/authorizer:2.3.0`.
 
 ### Quick start
 

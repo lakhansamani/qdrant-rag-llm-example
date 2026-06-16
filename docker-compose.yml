@@ -3,8 +3,8 @@ services:
     image: qdrant/qdrant:latest
     container_name: rag-local-demo-qdrant
     ports:
-      - "6333:6333"   # REST API + built-in dashboard UI (http://localhost:6333/dashboard)
-      - "6334:6334"   # gRPC API
+      - "6333:6333" # REST API + built-in dashboard UI (http://localhost:6333/dashboard)
+      - "6334:6334" # gRPC API
     volumes:
       - ./qdrant_data:/qdrant/storage
     restart: unless-stopped
@@ -14,11 +14,11 @@ services:
   # FGA needs Authorizer >= v2.3.0; override with AUTHORIZER_IMAGE if needed.
   # Demo-only credentials below.
   authorizer:
-    image: ${AUTHORIZER_IMAGE:-quay.io/authorizer/authorizer:2.3.0-rc.2}
+    image: ${AUTHORIZER_IMAGE:-quay.io/authorizer/authorizer:2.3.0}
     container_name: rag-local-demo-authorizer
     user: root
     ports:
-      - "8080:8080"   # GraphQL API + login app (/app) + admin dashboard (/dashboard)
+      - "8080:8080" # GraphQL API + login app (/app) + admin dashboard (/dashboard)
     volumes:
       - authorizer_data:/authorizer/data
     command:
