@@ -1,6 +1,6 @@
-# Local RAG Knowledge Base Demo
+# Local RAG Knowledge Base Demo With FGA
 
-This project is a **fully local Retrieval-Augmented Generation (RAG) demo**: you load plain-text documents, ask questions in a web UI, and get answers grounded in those files with cited sources. Embeddings (FastEmbed), vector search (Qdrant), and text generation (Ollama) all run on your machine—no OpenAI or other cloud APIs in the pipeline.
+This project is a **fully local Retrieval-Augmented Generation (RAG) demo**: you load plain-text documents, ask questions in a web UI, and get answers grounded in those files with cited sources and only if you have permissions to access that doc. Embeddings (FastEmbed), vector search (Qdrant), and text generation (Ollama) all run on your machine—no OpenAI or other cloud APIs in the pipeline.
 
 > Stack: **Qdrant** · **FastEmbed** · **Ollama** · **Gradio** · Python 3.11+
 
