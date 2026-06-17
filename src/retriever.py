@@ -13,6 +13,8 @@ Why chunk instead of embedding whole documents?
   - Chunks overlap slightly so context isn't lost at boundaries.
 """
 
+import re
+import uuid
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -87,35 +89,47 @@ class Retriever:
 
     def _split_text(self, text: str, source: str) -> list[DocumentChunk]:
         """
-        Split a long document into overlapping character-level chunks.
+        Split a document into chunks that respect paragraph/section boundaries.
 
-        Simple sliding-window approach:
-          - Start at position 0
-          - Take chunk_size characters
-          - Advance by (chunk_size - chunk_overlap) characters
-          - Repeat until end of document
+        Strategy:
+          1. Split on blank lines to get natural paragraphs (preserves section
+             structure in numbered docs like tech_stack.txt).
+          2. Greedily pack consecutive paragraphs up to chunk_size characters.
+          3. If a single paragraph exceeds chunk_size, fall back to the
+             character-level sliding window with overlap.
 
-        Args:
-            text:   Full document text.
-            source: Document identifier (e.g. filename).
-
-        Returns:
-            List of DocumentChunk objects.
+        This keeps related content (e.g. an entire "2. FRONTEND" section) in
+        one chunk so similarity search returns the right section, not a mixed
+        backend+frontend blob.
         """
+        paragraphs = [p.strip() for p in re.split(r'\n\n+', text) if p.strip()]
         chunks: list[DocumentChunk] = []
-        step = self.chunk_size - self.chunk_overlap
-        idx = 0
+        current = ""
 
-        while idx < len(text):
-            chunk_text = text[idx: idx + self.chunk_size].strip()
-            if chunk_text:  # Skip empty chunks
-                chunks.append(DocumentChunk(
-                    text=chunk_text,
-                    source=source,
-                    chunk_index=len(chunks),
-                ))
-            idx += step
+        def _emit(t: str) -> None:
+            t = t.strip()
+            if t:
+                chunks.append(DocumentChunk(text=t, source=source, chunk_index=len(chunks)))
 
+        def _char_split(t: str) -> None:
+            step = self.chunk_size - self.chunk_overlap
+            for i in range(0, len(t), step):
+                _emit(t[i: i + self.chunk_size])
+
+        for para in paragraphs:
+            if len(para) > self.chunk_size:
+                # Oversized paragraph: flush current buffer, then char-split it.
+                _emit(current)
+                current = ""
+                _char_split(para)
+            elif current and len(current) + 2 + len(para) > self.chunk_size:
+                # Adding this paragraph would overflow: flush and start fresh.
+                _emit(current)
+                current = para
+            else:
+                current = (current + "\n\n" + para) if current else para
+
+        _emit(current)
         return chunks
 
     # ── Ingestion ────────────────────────────────────────────────────────────
@@ -138,18 +152,21 @@ class Retriever:
         # Embed all chunk texts in a single batched call (efficient)
         texts = [c.text for c in chunks]
         vectors = self.embedder.embed(texts)
-
-        # Build payloads — the data stored alongside each vector in Qdrant
         payloads = [
-            {
-                "text": c.text,
-                "source": c.source,
-                "chunk_index": c.chunk_index,
-            }
+            {"text": c.text, "source": c.source, "chunk_index": c.chunk_index}
             for c in chunks
         ]
 
+        # Qdrant best practice: upsert first (zero downtime), then delete stale.
+        # IDs are deterministic so existing chunks are overwritten in-place;
+        # only chunks beyond the new chunk count are stale and need removal.
+        old_ids = self.store.get_ids_for_source(source)
         self.store.upsert(vectors=vectors, payloads=payloads)
+        new_ids = {
+            str(uuid.uuid5(uuid.NAMESPACE_OID, f"{source}:{c.chunk_index}"))
+            for c in chunks
+        }
+        self.store.delete_ids(old_ids - new_ids)
         return len(chunks)
 
     def ingest_file(self, path: Path) -> int:

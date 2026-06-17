@@ -26,7 +26,15 @@ from pathlib import Path
 # Allow imports from the project root
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from scripts.fga_seed import DEMO_PASSWORD, AdminClient
+from authorizer import (
+    AuthorizerAdminClient,
+    FgaTupleInput,
+    FgaWriteTuplesRequest,
+    PaginatedRequest,
+    PaginationRequest,
+)
+
+from scripts.fga_seed import DEMO_PASSWORD
 from src.authz import AuthzClient
 from src.pipeline import RAGPipeline
 
@@ -72,10 +80,10 @@ def main() -> None:
                         help="Authorizer server URL")
     parser.add_argument("--admin-secret", default="admin",
                         help="Admin secret (used only for the revocation demo)")
-    parser.add_argument("--storage", default=":memory:",
-                        help="Qdrant storage (':memory:', a path, or a server URL)")
-    parser.add_argument("--data", default="data/knowledge_base",
-                        help="Directory of .txt documents")
+    parser.add_argument("--client-id", default="123456",
+                        help="Authorizer client id")
+    parser.add_argument("--storage", default="http://localhost:6333",
+                        help="Qdrant storage URL or file path (must already be ingested via fga_seed.py)")
     parser.add_argument("--model", default="llama3.2", help="Ollama model (with --llm)")
     parser.add_argument("--llm", action="store_true",
                         help="Generate answers via Ollama (default: retrieval-only)")
@@ -86,15 +94,14 @@ def main() -> None:
     print("Authorizer (embedded OpenFGA) + Qdrant" + (" + Ollama" if args.llm else ""))
     print("=" * 60)
 
-    authz = AuthzClient(args.authorizer)
-    admin = AdminClient(args.authorizer, args.admin_secret)
+    authz = AuthzClient(args.authorizer, args.client_id)
+    admin = AuthorizerAdminClient(args.authorizer, args.admin_secret, protocol="rest")
 
     pipeline = RAGPipeline(
         storage_path=args.storage,
         llm_model=args.model,
         authz=authz,
     )
-    pipeline.ingest_directory(Path(args.data))
 
     print("⏳ Logging in demo users (created by scripts/fga_seed.py)...")
     tokens = {
@@ -117,28 +124,16 @@ def main() -> None:
     print("ACT 2 — Live grant & revocation (no re-ingestion, no re-login)")
     print("─" * 60)
 
-    bob_id_query = """query users { _users(params: { pagination: { limit: 50 } }) {
-        users { id email } } }"""
-    bob_id = next(
-        u["id"] for u in admin.graphql(bob_id_query)["_users"]["users"]
-        if u["email"] == "bob@example.com"
-    )
-    grant = {"user": f"user:{bob_id}", "relation": "member", "object": "team:engineering"}
+    users_res = admin.users(PaginatedRequest(pagination=PaginationRequest(limit=50)))
+    bob_id = next(u.id for u in users_res.users if u.email == "bob@example.com")
+    grant = FgaTupleInput(user=f"user:{bob_id}", relation="member", object="team:engineering")
 
     print("\n⚡ Granting: bob → member → team:engineering (one tuple write)")
-    admin.graphql(
-        """mutation w($params: FgaWriteTuplesInput!) {
-             _fga_write_tuples(params: $params) { message } }""",
-        {"params": {"tuples": [grant]}},
-    )
+    admin.fga_write_tuples(FgaWriteTuplesRequest(tuples=[grant]))
     show_user_turn(pipeline, authz, "bob@example.com", tokens["bob@example.com"], args.llm)
 
     print("\n⚡ Revoking the same tuple (offboarding in one call)")
-    admin.graphql(
-        """mutation d($params: FgaWriteTuplesInput!) {
-             _fga_delete_tuples(params: $params) { message } }""",
-        {"params": {"tuples": [grant]}},
-    )
+    admin.fga_delete_tuples(FgaWriteTuplesRequest(tuples=[grant]))
     show_user_turn(pipeline, authz, "bob@example.com", tokens["bob@example.com"], args.llm)
 
     print(f"\n{'=' * 60}")

@@ -31,15 +31,28 @@ Usage:
 """
 
 import argparse
-import json
 import sys
-import urllib.error
-import urllib.request
 from pathlib import Path
-from typing import Any
 
 # Allow imports from the project root
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from src.embedder import Embedder
+from src.retriever import Retriever
+from src.vector_store import VectorStore
+
+from authorizer import (
+    AuthorizerAdminClient,
+    AuthorizerClient,
+    FgaReadTuplesRequest,
+    FgaTupleInput,
+    FgaWriteModelRequest,
+    FgaWriteTuplesRequest,
+    PaginatedRequest,
+    PaginationRequest,
+    SignUpRequest,
+)
+from authorizer.exceptions import AuthorizerError
 
 from src.authz import AuthorizationError, AuthzClient
 
@@ -77,58 +90,25 @@ TUPLES = [
 ]
 
 
-class AdminClient:
-    """Minimal admin-side GraphQL client (X-Authorizer-Admin-Secret auth)."""
-
-    def __init__(self, base_url: str, admin_secret: str, timeout: float = 10.0):
-        self.base_url = base_url.rstrip("/")
-        self.admin_secret = admin_secret
-        self.timeout = timeout
-
-    def graphql(self, query: str, variables: dict[str, Any] | None = None,
-                admin: bool = True) -> dict[str, Any]:
-        """POST a GraphQL request; raises RuntimeError on any error."""
-        # Authorizer's CSRF guard requires Origin/Referer on POSTs.
-        headers = {"Content-Type": "application/json", "Origin": self.base_url}
-        if admin:
-            headers["X-Authorizer-Admin-Secret"] = self.admin_secret
-        payload = json.dumps({"query": query, "variables": variables or {}})
-        request = urllib.request.Request(
-            f"{self.base_url}/graphql",
-            data=payload.encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                body = json.loads(response.read().decode("utf-8"))
-        except (urllib.error.URLError, OSError) as e:
-            raise RuntimeError(f"Authorizer unreachable at {self.base_url}: {e}") from e
-        if body.get("errors"):
-            raise RuntimeError(body["errors"][0].get("message", "GraphQL error"))
-        return body.get("data") or {}
-
-
 # ── Seed steps ────────────────────────────────────────────────────────────────
 
-def ensure_user(admin: AdminClient, authz: AuthzClient, email: str) -> str:
+def ensure_user(
+    admin: AuthorizerAdminClient,
+    user_client: AuthorizerClient,
+    authz: AuthzClient,
+    email: str,
+) -> str:
     """Sign the user up (tolerating 'already exists'), return their user id."""
     try:
-        data = admin.graphql(
-            """mutation signup($params: SignUpRequest!) {
-                 signup(params: $params) { user { id } }
-               }""",
-            {"params": {
-                "email": email,
-                "password": DEMO_PASSWORD,
-                "confirm_password": DEMO_PASSWORD,
-            }},
-            admin=False,
-        )
-        user_id = data["signup"]["user"]["id"]
-        print(f"  ✓ Created user {email}")
-        return user_id
-    except RuntimeError as signup_error:
+        res = user_client.signup(SignUpRequest(
+            email=email,
+            password=DEMO_PASSWORD,
+            confirm_password=DEMO_PASSWORD,
+        ))
+        if res.user and res.user.id:
+            print(f"  ✓ Created user {email}")
+            return res.user.id
+    except AuthorizerError as signup_error:
         # The server's signup error is deliberately generic (it doesn't reveal
         # whether the account exists). A successful login with the demo
         # password is the reliable "already seeded" signal.
@@ -136,18 +116,16 @@ def ensure_user(admin: AdminClient, authz: AuthzClient, email: str) -> str:
             authz.login(email, DEMO_PASSWORD)
         except AuthorizationError:
             raise RuntimeError(f"signup failed for {email}: {signup_error}") from signup_error
-    data = admin.graphql(
-        """query users { _users(params: { pagination: { limit: 50 } }) {
-             users { id email } } }"""
-    )
-    for user in data["_users"]["users"]:
-        if user["email"] == email:
+
+    users_res = admin.users(PaginatedRequest(pagination=PaginationRequest(limit=50)))
+    for user in users_res.users:
+        if user.email == email:
             print(f"  ✓ User {email} already exists")
-            return user["id"]
+            return user.id
     raise RuntimeError(f"could not resolve id for existing user {email}")
 
 
-def ensure_model(admin: AdminClient) -> None:
+def ensure_model(admin: AuthorizerAdminClient) -> None:
     """Install MODEL_DSL unless the active model already matches it."""
     def _normalise(dsl: str) -> list[str]:
         # The server returns the DSL with relations alphabetised within each
@@ -156,33 +134,23 @@ def ensure_model(admin: AdminClient) -> None:
         return sorted(line.strip() for line in dsl.splitlines() if line.strip())
 
     try:
-        current = admin.graphql("query { _fga_get_model { id dsl } }")
-        if _normalise(current["_fga_get_model"]["dsl"]) == _normalise(MODEL_DSL):
+        current = admin.fga_get_model()
+        if _normalise(current.dsl) == _normalise(MODEL_DSL):
             print("  ✓ Authorization model already active")
             return
-    except RuntimeError:
+    except AuthorizerError:
         pass  # No model yet (or FGA freshly enabled) — write one.
 
-    data = admin.graphql(
-        """mutation writeModel($params: FgaWriteModelInput!) {
-             _fga_write_model(params: $params) { id }
-           }""",
-        {"params": {"dsl": MODEL_DSL}},
-    )
-    print(f"  ✓ Installed authorization model {data['_fga_write_model']['id']}")
+    model = admin.fga_write_model(FgaWriteModelRequest(dsl=MODEL_DSL))
+    print(f"  ✓ Installed authorization model {model.id}")
 
 
-def ensure_tuples(admin: AdminClient, alice_id: str, carol_id: str) -> None:
+def ensure_tuples(admin: AuthorizerAdminClient, alice_id: str, carol_id: str) -> None:
     """Write the demo grants that don't exist yet (idempotent)."""
     existing: set[tuple[str, str, str]] = set()
-    data = admin.graphql(
-        """query readTuples($params: FgaReadTuplesInput!) {
-             _fga_read_tuples(params: $params) { tuples { user relation object } }
-           }""",
-        {"params": {"page_size": 100}},
-    )
-    for t in data["_fga_read_tuples"]["tuples"]:
-        existing.add((t["user"], t["relation"], t["object"]))
+    read_res = admin.fga_read_tuples(FgaReadTuplesRequest(page_size=100))
+    for t in read_res.tuples:
+        existing.add((t.user, t.relation, t.object))
 
     wanted = [
         (user.format(alice=alice_id, carol=carol_id), relation, obj)
@@ -193,14 +161,9 @@ def ensure_tuples(admin: AdminClient, alice_id: str, carol_id: str) -> None:
         print("  ✓ All grants already in place")
         return
 
-    admin.graphql(
-        """mutation writeTuples($params: FgaWriteTuplesInput!) {
-             _fga_write_tuples(params: $params) { message }
-           }""",
-        {"params": {"tuples": [
-            {"user": u, "relation": r, "object": o} for u, r, o in missing
-        ]}},
-    )
+    admin.fga_write_tuples(FgaWriteTuplesRequest(tuples=[
+        FgaTupleInput(user=u, relation=r, object=o) for u, r, o in missing
+    ]))
     for u, r, o in missing:
         print(f"  ✓ Granted: {u}  {r}  {o}")
 
@@ -211,17 +174,27 @@ def main() -> None:
                         help="Authorizer server URL")
     parser.add_argument("--admin-secret", default="admin",
                         help="Authorizer admin secret (see docker-compose.yml)")
+    parser.add_argument("--client-id", default="123456",
+                        help="Authorizer client id")
+    parser.add_argument("--storage", default="http://localhost:6333",
+                        help="Qdrant storage URL, file path, or ':memory:'")
+    parser.add_argument("--data", default="data/knowledge_base",
+                        help="Directory of .txt documents to ingest")
     args = parser.parse_args()
 
-    admin = AdminClient(args.authorizer, args.admin_secret)
-    authz = AuthzClient(args.authorizer)
+    admin = AuthorizerAdminClient(args.authorizer, args.admin_secret, protocol="rest")
+    user_client = AuthorizerClient(args.client_id, args.authorizer, protocol="rest")
+    authz = AuthzClient(args.authorizer, args.client_id)
 
     print("=" * 60)
     print("RAG LOCAL DEMO — FGA Seed (Authorizer + OpenFGA)")
     print("=" * 60)
 
     print("\n⏳ Ensuring demo users exist...")
-    user_ids = {email: ensure_user(admin, authz, email) for email in DEMO_USERS}
+    user_ids = {
+        email: ensure_user(admin, user_client, authz, email)
+        for email in DEMO_USERS
+    }
 
     print("\n⏳ Ensuring authorization model is active...")
     ensure_model(admin)
@@ -233,13 +206,27 @@ def main() -> None:
         carol_id=user_ids["carol@example.com"],
     )
 
+    print("\n⏳ Ingesting knowledge base documents...")
+    data_path = Path(args.data)
+    if not data_path.exists():
+        raise SystemExit(f"❌ Data directory not found: {data_path.resolve()}")
+    embedder = Embedder()
+    store = VectorStore(
+        collection="knowledge_base",
+        vector_size=embedder.vector_size,
+        path=args.storage,
+    )
+    retriever = Retriever(store=store, embedder=embedder)
+    retriever.ingest_directory(data_path)
+    print(f"  ✓ {store.count()} chunks indexed in Qdrant")
+
     print(f"\n{'=' * 60}")
     print("✅ Seed complete. Demo credentials:")
     for email in DEMO_USERS:
         print(f"   {email}  /  {DEMO_PASSWORD}")
     print("\n💡 Next:")
-    print("   python scripts/fga_demo.py          # CLI walk-through")
-    print("   python src/app.py --authorizer " + args.authorizer)
+    print("   python scripts/fga_demo.py --storage " + args.storage)
+    print("   python src/app.py --authorizer " + args.authorizer + " --storage " + args.storage)
     print("=" * 60)
 
 

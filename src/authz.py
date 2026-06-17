@@ -28,11 +28,14 @@ The SDK already sends the CSRF `Origin` header required by Authorizer >= v2.3.0
 from authorizer import (
     AuthorizerClient,
     CheckPermissionsRequest,
+    GetTokenRequest,
     ListPermissionsRequest,
     LoginRequest,
     PermissionCheckInput,
+    ValidateJWTTokenRequest,
 )
-from authorizer.exceptions import AuthorizerError
+from authorizer.types import TokenType
+from authorizer.exceptions import AuthorizerError, AuthorizerConnectionError
 
 # The default Authorizer server address. See docker-compose.yml.
 AUTHORIZER_BASE_URL = "http://localhost:8080"
@@ -71,24 +74,54 @@ class AuthzClient:
             client_id: Authorizer client id (value of the server's --client-id).
         """
         self.base_url = base_url.rstrip("/")
-        self._client = AuthorizerClient(client_id, self.base_url)
+        self._client = AuthorizerClient(client_id, self.base_url, protocol="rest")
 
     # ── Public API ──────────────────────────────────────────────────────────
 
     def login(self, email: str, password: str) -> str:
-        """
-        Authenticate a user and return their access token.
+        """Authenticate and return the access token."""
+        access, _ = self.login_full(email, password)
+        return access
 
-        Raises:
-            AuthorizationError: On bad credentials or an unreachable server.
-        """
+    def login_full(self, email: str, password: str) -> tuple[str, str]:
+        """Authenticate and return (access_token, refresh_token)."""
         try:
             res = self._client.login(LoginRequest(email=email, password=password))
         except AuthorizerError as e:
             raise AuthorizationError(str(e)) from e
         if not res.access_token:
             raise AuthorizationError("login succeeded but returned no access token")
-        return res.access_token
+        return res.access_token, res.refresh_token or ""
+
+    def validate_token(self, token: str) -> bool:
+        """Return True if the access token is still valid."""
+        try:
+            res = self._client.validate_jwt_token(
+                ValidateJWTTokenRequest(token=token, token_type=TokenType.ACCESS_TOKEN)
+            )
+            return bool(res.is_valid)
+        except (AuthorizerError, AuthorizerConnectionError):
+            return False
+
+    def refresh(self, refresh_token: str) -> tuple[str, str]:
+        """Exchange a refresh token for a new (access_token, refresh_token) pair."""
+        try:
+            res = self._client.get_token(GetTokenRequest(
+                grant_type="refresh_token",
+                refresh_token=refresh_token,
+            ))
+        except AuthorizerError as e:
+            raise AuthorizationError(str(e)) from e
+        if not res.access_token:
+            raise AuthorizationError("token refresh returned no access token")
+        return res.access_token, res.refresh_token or ""
+
+    def server_logout(self, user_token: str) -> None:
+        """Revoke the session server-side (best-effort; local state cleared regardless)."""
+        try:
+            self._client.logout(headers=self._bearer(user_token))
+        except (AuthorizerError, AuthorizerConnectionError):
+            pass
 
     def allowed_documents(self, user_token: str) -> list[str]:
         """

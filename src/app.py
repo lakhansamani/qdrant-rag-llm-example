@@ -32,7 +32,6 @@ from src.authz import AuthorizationError, AuthzClient
 from src.pipeline import RAGPipeline
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
-DATA_DIR = Path(__file__).parent.parent / "data" / "knowledge_base"
 DEFAULT_MODEL = "llama3.2"
 # Default to the Qdrant Docker container so users get the built-in dashboard UI
 # at http://localhost:6333/dashboard. Override with ":memory:" or "./qdrant_data".
@@ -80,7 +79,8 @@ def build_app(
             header += f"\n>\n> 🧭 *Qdrant dashboard:* [{dashboard_url}]({dashboard_url})"
         gr.Markdown(header)
 
-        token_state = gr.State("")
+        token_state = gr.BrowserState("")
+        refresh_token_state = gr.BrowserState("")
 
         # ── LOGIN SCREEN (FGA mode only; shown first, chat hidden) ─────────
         login_view = None
@@ -148,12 +148,12 @@ def build_app(
 
                     gr.Examples(
                         examples=[
-                            ["What was our Q4 revenue and cash runway?"],
                             ["What tech stack do we use for the frontend?"],
-                            ["How do I report a security incident?"],
-                            ["What is the annual leave entitlement?"],
-                            ["How do I get access to GitHub?"],
-                            ["What is our data residency policy?"],
+                            ["What was our Q4 revenue and cash runway?"],
+                            ["What is the annual leave policy?"],
+                            ["What CI/CD and monitoring tools do we use?"],
+                            ["How do I set up my local development environment?"],
+                            ["What is the on-call rotation policy?"],
                         ],
                         inputs=question_box,
                         label="Example questions",
@@ -258,34 +258,61 @@ def build_app(
             # the authorizer-py SDK). On success the token is stored and the
             # chat is revealed; on failure the login screen stays put.
             def do_login(email: str, password: str):
+                _empty = ([], "*Ask a question to see which documents were used.*")
                 if not email.strip() or not password:
-                    return "", "Please enter your email and password."
+                    return "", "", "Please enter your email and password.", *_empty
                 try:
-                    token = authz.login(email.strip(), password)
-                    allowed = authz.allowed_documents(token)
+                    access, refresh = authz.login_full(email.strip(), password)
+                    allowed = authz.allowed_documents(access)
                     docs = ", ".join(sorted(allowed)) if allowed else "no documents"
-                    return token, f"Logged in as {email.strip()} — may view: {docs}"
+                    return access, refresh, f"Logged in as {email.strip()} — may view: {docs}", *_empty
                 except AuthorizationError as e:
-                    return "", f"Login failed: {e}"
+                    return "", "", f"Login failed: {e}", *_empty
 
+            _login_outputs = [token_state, refresh_token_state, login_status, chatbot, sources_panel]
             login_btn.click(
-                do_login, [email_box, password_box], [token_state, login_status],
+                do_login, [email_box, password_box], _login_outputs,
             ).then(reveal, token_state, [login_view, chat_view])
             password_box.submit(
-                do_login, [email_box, password_box], [token_state, login_status],
+                do_login, [email_box, password_box], _login_outputs,
             ).then(reveal, token_state, [login_view, chat_view])
 
-            def greet(token: str):
-                return "✅ Logged in." if token else ""
+            def on_token_restore(token: str, refresh_tok: str):
+                """Called on page load when BrowserState restores stored tokens.
 
-            token_state.change(greet, token_state, session_banner)
+                Validates the access token; silently refreshes if expired;
+                redirects to login if both are gone or invalid.
+                """
+                _show_login = ("", "", "", gr.update(visible=True), gr.update(visible=False))
+                _show_chat  = lambda t, r: (t, r, "✅ Logged in.", gr.update(visible=False), gr.update(visible=True))  # noqa: E731
+
+                if not token:
+                    return _show_login
+                if authz.validate_token(token):
+                    return _show_chat(token, refresh_tok)
+                # Access token expired — try a silent refresh
+                if refresh_tok:
+                    try:
+                        new_access, new_refresh = authz.refresh(refresh_tok)
+                        return _show_chat(new_access, new_refresh)
+                    except AuthorizationError:
+                        pass
+                return _show_login
+
+            token_state.change(
+                on_token_restore,
+                [token_state, refresh_token_state],
+                [token_state, refresh_token_state, session_banner, login_view, chat_view],
+            )
 
             # Log out: clear the token and return to the login screen.
-            def do_logout():
-                return "", "Logged out. Enter your credentials to log in."
+            def do_logout(token: str):
+                authz.server_logout(token)
+                return "", "", "Logged out. Enter your credentials to log in.", [], "*Ask a question to see which documents were used.*"
 
             logout_btn.click(
-                do_logout, None, [token_state, login_status],
+                do_logout, [token_state],
+                [token_state, refresh_token_state, login_status, chatbot, sources_panel],
             ).then(reveal, token_state, [login_view, chat_view])
 
     return demo
@@ -294,8 +321,8 @@ def build_app(
 def main():
     parser = argparse.ArgumentParser(description="Local RAG Knowledge Base UI")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="Ollama model name")
-    parser.add_argument("--storage", default=DEFAULT_STORAGE, help="Qdrant storage path")
-    parser.add_argument("--data", default=str(DATA_DIR), help="Knowledge base directory")
+    parser.add_argument("--storage", default=DEFAULT_STORAGE,
+                        help="Qdrant storage URL or path (must be pre-ingested via fga_seed.py or scripts/ingest.py)")
     parser.add_argument("--port", type=int, default=7860, help="Gradio server port")
     parser.add_argument("--share", action="store_true", help="Create a public Gradio link")
     parser.add_argument(
@@ -307,7 +334,6 @@ def main():
     )
     args = parser.parse_args()
 
-    # Build the pipeline and ingest documents
     authz = AuthzClient(args.authorizer) if args.authorizer else None
     pipeline = RAGPipeline(
         llm_model=args.model,
@@ -318,7 +344,6 @@ def main():
         pipeline.llm.ensure_model_available()
     except (RuntimeError, ConnectionError) as e:
         raise SystemExit(f"\n{e}\n") from e
-    pipeline.ingest_directory(Path(args.data))
 
     # Build and launch the Gradio UI
     app = build_app(pipeline, storage=args.storage, authz=authz)

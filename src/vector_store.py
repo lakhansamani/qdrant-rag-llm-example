@@ -21,13 +21,16 @@ from typing import Any
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
+    FieldCondition,
+    Filter,
+    KeywordIndexParams,
+    MatchAny,
+    MatchValue,
+    PayloadSchemaType,
+    PointIdsList,
     PointStruct,
     ScoredPoint,
     VectorParams,
-    Filter,
-    FieldCondition,
-    MatchAny,
-    MatchValue,
 )
 
 
@@ -84,13 +87,20 @@ class VectorStore:
     # ── Internal helpers ────────────────────────────────────────────────────
 
     def _ensure_collection(self, distance: Distance) -> None:
-        """Create the Qdrant collection if it doesn't exist yet."""
+        """Create the collection and payload index on 'source' if needed."""
         existing = [c.name for c in self._client.get_collections().collections]
         if self.collection not in existing:
             self._client.create_collection(
                 collection_name=self.collection,
                 vectors_config=VectorParams(size=self.vector_size, distance=distance),
             )
+        # Keyword index on 'source' makes filter-based operations O(log n)
+        # instead of a full scan. create_payload_index is idempotent.
+        self._client.create_payload_index(
+            collection_name=self.collection,
+            field_name="source",
+            field_schema=PayloadSchemaType.KEYWORD,
+        )
 
     # ── Public API ──────────────────────────────────────────────────────────
 
@@ -115,9 +125,15 @@ class VectorStore:
         if not vectors:
             return
 
-        # Auto-generate UUIDs if the caller didn't provide IDs.
-        # Qdrant in-memory mode requires IDs to be valid UUID strings or integers.
-        point_ids = ids or [str(uuid.uuid4()) for _ in vectors]
+        # Derive deterministic IDs from payload so re-ingesting the same
+        # (source, chunk_index) overwrites rather than duplicates the point.
+        if ids:
+            point_ids = ids
+        else:
+            point_ids = [
+                str(uuid.uuid5(uuid.NAMESPACE_OID, f"{p.get('source','')}:{p.get('chunk_index',i)}"))
+                for i, p in enumerate(payloads)
+            ]
 
         points = [
             PointStruct(
@@ -190,6 +206,34 @@ class VectorStore:
         """Return the number of vectors stored in the collection."""
         info = self._client.get_collection(self.collection)
         return info.points_count or 0
+
+    def get_ids_for_source(self, source: str) -> set[str]:
+        """Return all point IDs currently stored for a given source document."""
+        ids: set[str] = set()
+        next_offset = None
+        while True:
+            results, next_offset = self._client.scroll(
+                collection_name=self.collection,
+                scroll_filter=Filter(
+                    must=[FieldCondition(key="source", match=MatchValue(value=source))]
+                ),
+                with_payload=False,
+                with_vectors=False,
+                limit=256,
+                offset=next_offset,
+            )
+            ids.update(str(p.id) for p in results)
+            if next_offset is None:
+                break
+        return ids
+
+    def delete_ids(self, ids: set[str]) -> None:
+        """Delete specific points by ID."""
+        if ids:
+            self._client.delete(
+                collection_name=self.collection,
+                points_selector=PointIdsList(points=list(ids)),
+            )
 
     def delete_collection(self) -> None:
         """Drop the entire collection. Useful in tests for teardown."""
